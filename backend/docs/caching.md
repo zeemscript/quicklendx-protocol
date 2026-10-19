@@ -15,11 +15,12 @@ and cache-poisoning mitigations.
 4. [ETag generation](#4-etag-generation)
 5. [Last-Modified generation](#5-last-modified-generation)
 6. [Conditional-request flow](#6-conditional-request-flow)
-7. [Vary header](#7-vary-header)
-8. [Cache-poisoning mitigations](#8-cache-poisoning-mitigations)
-9. [Implementation reference](#9-implementation-reference)
-10. [Testing](#10-testing)
-11. [Future work](#11-future-work)
+7. [Conditional writes (If-Match / If-Unmodified-Since)](#7-conditional-writes-if-match--if-unmodified-since)
+8. [Vary header](#8-vary-header)
+9. [Cache-poisoning mitigations](#9-cache-poisoning-mitigations)
+10. [Implementation reference](#10-implementation-reference)
+11. [Testing](#11-testing)
+12. [Future work](#12-future-work)
 
 ---
 
@@ -56,6 +57,10 @@ are infrequent but must be visible within a short window.  A 10-second
   purposes.
 - After 40 s the cache must revalidate before serving.
 
+**Portfolio** — `GET /api/v1/portfolio`
+
+Portfolio records represent the investor's current active, completed, defaulted, or refunded investments. They change when bids are accepted or invoices settle, which is moderately frequent during peak trading. A 10-second short TTL caching (`CC_SHORT`) is applied to allow fast UI updates while avoiding database load on repeated visits.
+
 ### 2.2 Cacheable endpoints (long TTL)
 
 **Settlements** — `GET /api/v1/settlements`, `GET /api/v1/settlements/:id`
@@ -70,7 +75,7 @@ window is safe because:
 
 ### 2.3 Non-cacheable endpoints (no-store)
 
-**Bids** — `GET /api/v1/bids`
+**Bids** — `GET /api/v1/bids`, `GET /api/v1/bids/best/:invoiceId`, `GET /api/v1/bids/top/:invoiceId`
 
 > **Correctness invariant**: a client must never act on a stale bid list.
 
@@ -103,7 +108,10 @@ is mandatory for the same reasons as bids.
 |----------|-----------|----------|
 | `GET /api/v1/invoices` | `public, max-age=10, stale-while-revalidate=30` | `CC_SHORT` |
 | `GET /api/v1/invoices/:id` | `public, max-age=10, stale-while-revalidate=30` | `CC_SHORT` |
+| `GET /api/v1/portfolio` | `public, max-age=10, stale-while-revalidate=30` | `CC_SHORT` |
 | `GET /api/v1/bids` | `no-store` | `CC_NO_STORE` |
+| `GET /api/v1/bids/best/:invoiceId` | `no-store` | `CC_NO_STORE` |
+| `GET /api/v1/bids/top/:invoiceId` | `no-store` | `CC_NO_STORE` |
 | `GET /api/v1/settlements` | `public, max-age=60, stale-while-revalidate=120` | `CC_LONG` |
 | `GET /api/v1/settlements/:id` | `public, max-age=60, stale-while-revalidate=120` | `CC_LONG` |
 | `GET /api/v1/invoices/:id/disputes` | `no-store` | `CC_NO_STORE` |
@@ -212,7 +220,81 @@ Express evaluates freshness.  This ensures that even a client sending
 
 ---
 
-## 7. Vary header
+## 7. Conditional writes (If-Match / If-Unmodified-Since)
+
+### Supported endpoints
+
+| Endpoint | Precondition target | Required? |
+|----------|--------------------|-----------|
+| `POST /api/v1/bids` | Invoice ETag (from `invoiceStore.findInvoiceById`) | No (optional, `required: false`) |
+
+The precondition check compares the client-supplied `If-Match` header against
+the invoice's current ETag — **not** the bid being created.  This allows a
+client that has recently fetched an invoice to guarantee the invoice has not
+been modified between the read and the bid placement.
+
+### How it works
+
+```
+Client                              Server
+  |
+  |  GET /api/v1/invoices/:id
+  |---------------------------------->|
+  |                                   |  200 OK
+  |                                   |  ETag: "abc123"
+  |<----------------------------------|
+  |
+  |  POST /api/v1/bids
+  |  If-Match: "abc123"
+  |  { invoice_id, bid_amount, ... }
+  |---------------------------------->|
+  |                                   |  ETag matches → proceed
+  |                                   |  201 Created
+  |<----------------------------------|
+  |
+  |  POST /api/v1/bids
+  |  If-Match: "outdated"
+  |  { invoice_id, bid_amount, ... }
+  |---------------------------------->|
+  |                                   |  ETag mismatch → reject
+  |                                   |  412 Precondition Failed
+  |<----------------------------------|
+```
+
+### Backward compatibility
+
+Today `required` is set to `false`, so requests without an `If-Match` header
+continue to succeed unchanged.  To make the header mandatory in the future,
+change the controller call to `{ required: true }`.  Clients that do not send
+`If-Match` will then receive a `400` with code `PRECONDITION_REQUIRED`.
+
+### Wildcard semantics
+
+`If-Match: *` means "any current representation" per RFC 7232.  It requires
+the resource to currently exist.  If the invoice does not exist (ETag is
+`null`), the wildcard still fails with 412.
+
+This is distinct from `If-None-Match: *` ("create only if not exists"), which
+is a conditional-read semantic not yet implemented for write endpoints.
+
+### If-Unmodified-Since
+
+`If-Unmodified-Since` is also supported as a secondary precondition.  If the
+invoice's `updated_at` timestamp is more recent than the header date, the
+request is rejected with 412.  When both `If-Match` and
+`If-Unmodified-Since` are present, `If-Match` is evaluated first.
+
+### TOCTOU limitation
+
+The ETag/precondition check reads the invoice via `invoiceStore.findInvoiceById`
+(synchronous SQLite), while the subsequent `bidStore.createBid` opens its own
+Postgres transaction and re-reads the invoice independently.  There is a small
+window between the two reads where the invoice could be modified.  See the
+[Future work](#12-future-work) table for the planned fix.
+
+---
+
+## 8. Vary header
 
 All responses (cacheable and no-store) include:
 
@@ -227,7 +309,7 @@ does not support compression, or vice versa.
 
 ---
 
-## 8. Cache-poisoning mitigations
+## 9. Cache-poisoning mitigations
 
 | Threat | Mitigation |
 |--------|-----------|
@@ -241,7 +323,7 @@ does not support compression, or vice versa.
 
 ---
 
-## 9. Implementation reference
+## 10. Implementation reference
 
 All caching logic lives in a single file:
 
@@ -318,7 +400,7 @@ export const getBids = async (req, res, next) => {
 
 ---
 
-## 10. Testing
+## 11. Testing
 
 Security and correctness regression tests live in:
 
@@ -354,7 +436,7 @@ Expected: **68 tests, 0 failures**.
 
 ---
 
-## 11. Future work
+## 12. Future work
 
 | Item | Notes |
 |------|-------|
@@ -363,3 +445,4 @@ Expected: **68 tests, 0 failures**.
 | `s-maxage` for CDN differentiation | Add `s-maxage` to allow CDNs to cache longer than browsers |
 | Redis-backed ETag store | For multi-instance deployments, ETags should be computed from the DB record's version/updated_at rather than the serialised body to avoid inconsistency across instances |
 | `Surrogate-Control` / `CDN-Cache-Control` | For Fastly/Cloudflare, use vendor-specific headers to set CDN TTLs independently of browser TTLs |
+| Close TOCTOU gap in conditional writes | Move the `If-Match` / `updated_at` comparison inside `bidStore.createBid`'s `BEGIN` transaction so the invoice re-read and the bid insert happen atomically (e.g., `SELECT … FOR UPDATE` + compare `updated_at` within the same `BEGIN`) |

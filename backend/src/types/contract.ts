@@ -45,6 +45,7 @@ export enum DisputeStatus {
 
 export enum SettlementStatus {
   Pending = "Pending",
+  Processing = "Processing",
   Paid = "Paid",
   Defaulted = "Defaulted",
 }
@@ -154,3 +155,16 @@ export interface NotificationTemplate {
   html: string;
   text: string;
 }
+
+export interface FreshnessMetadata {
+  lastIndexedLedger: number;
+  indexLagSeconds: number;
+  lastUpdatedAt: string;
+  cursor: string;
+}
+
+export interface FreshnessEnvelope<T> {
+  data: T;
+  freshness: FreshnessMetadata;
+}
+

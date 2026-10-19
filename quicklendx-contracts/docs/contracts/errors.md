@@ -68,10 +68,11 @@ This document defines the typed error surface for `QuickLendXError`, the validat
 | 2103 | `EmergencyWithdrawExpired` | Emergency withdrawal expired before execution. |
 | 2104 | `EmergencyWithdrawCancelled` | Emergency withdrawal has already been cancelled and cannot proceed. |
 | 2105 | `EmergencyWithdrawAlreadyExists` | A new emergency withdrawal was requested while one already exists. |
-| 2106 | `EmergencyWithdrawInsufficientBalance` | Contract balance is insufficient for the requested emergency withdrawal. |
+| 2106 | `EmergencyWithdrawInsufficientBalance` | Requested emergency withdrawal exceeds contract balance after same-token held escrow reserve, or reserve repair is incomplete. |
 | 2200 | `TokenTransferFailed` | Underlying token contract transfer or transfer-from failed. |
 | 2201 | `MaintenanceModeActive` | Mutating operation was attempted while maintenance mode is enabled. |
 | 2202 | `DuplicateDefaultTransition` | Default transition was attempted more than once for the same invoice. |
+| 2207 | `ActiveDisputeExists` | Report/analytics-snapshot generation (`export_analytics_snapshot`) was attempted while an invoice has an unresolved (`Disputed` or `UnderReview`) dispute. |
 
 ## Input validation strategy
 

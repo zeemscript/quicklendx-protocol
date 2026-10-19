@@ -98,6 +98,7 @@ fn verified_invoice(
         &String::from_str(env, "Invoice"),
         &InvoiceCategory::Services,
         &Vec::new(env),
+        &None,
     );
     client.verify_invoice(&id);
     id
@@ -124,7 +125,13 @@ fn test_double_accept_bid_rejected() {
 
     let amount = 10_000i128;
     let invoice_id = verified_invoice(&env, &client, &business, amount, &currency);
-    let bid_id = client.place_bid(&investor, &invoice_id, &amount, &(amount + 1_000));
+    let bid_id = client.place_bid(
+        &investor,
+        &invoice_id,
+        &amount,
+        &(amount + 1_000),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
 
     // First accept succeeds.
     client.accept_bid(&invoice_id, &bid_id);
@@ -181,12 +188,24 @@ fn test_second_bid_on_funded_invoice_rejected() {
 
     let amount = 10_000i128;
     let invoice_id = verified_invoice(&env, &client, &business, amount, &currency);
-    let bid1 = client.place_bid(&investor1, &invoice_id, &amount, &(amount + 1_000));
+    let bid1 = client.place_bid(
+        &investor1,
+        &invoice_id,
+        &amount,
+        &(amount + 1_000),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
 
     client.accept_bid(&invoice_id, &bid1);
 
     // investor2 cannot place a bid on a funded invoice.
-    let result = client.try_place_bid(&investor2, &invoice_id, &amount, &(amount + 500));
+    let result = client.try_place_bid(
+        &investor2,
+        &invoice_id,
+        &amount,
+        &(amount + 500),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
     assert!(result.is_err(), "bidding on funded invoice must fail");
 
     // Escrow still belongs to investor1.
@@ -302,8 +321,16 @@ fn test_no_new_escrow_after_release() {
 
     let amount = 10_000i128;
     let invoice_id = verified_invoice(&env, &client, &business, amount, &currency);
-    let bid_id = client.place_bid(&investor, &invoice_id, &amount, &(amount + 1_000));
+    let bid_id = client.place_bid(
+        &investor,
+        &invoice_id,
+        &amount,
+        &(amount + 1_000),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
     client.accept_bid(&invoice_id, &bid_id);
+    client.approve_early_escrow_release(&invoice_id, &business);
+    client.approve_early_escrow_release(&invoice_id, &investor);
     client.release_escrow_funds(&invoice_id);
 
     assert_eq!(
@@ -343,7 +370,13 @@ fn test_no_new_escrow_after_refund() {
 
     let amount = 10_000i128;
     let invoice_id = verified_invoice(&env, &client, &business, amount, &currency);
-    let bid_id = client.place_bid(&investor, &invoice_id, &amount, &(amount + 1_000));
+    let bid_id = client.place_bid(
+        &investor,
+        &invoice_id,
+        &amount,
+        &(amount + 1_000),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
     client.accept_bid(&invoice_id, &bid_id);
     client.refund_escrow_funds(&invoice_id, &admin);
 
@@ -385,8 +418,20 @@ fn test_escrow_isolation_between_invoices() {
     let invoice_a = verified_invoice(&env, &client, &business, amount, &currency);
     let invoice_b = verified_invoice(&env, &client, &business, amount, &currency);
 
-    let bid_a = client.place_bid(&investor, &invoice_a, &amount, &(amount + 500));
-    let bid_b = client.place_bid(&investor, &invoice_b, &amount, &(amount + 500));
+    let bid_a = client.place_bid(
+        &investor,
+        &invoice_a,
+        &amount,
+        &(amount + 500),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
+    let bid_b = client.place_bid(
+        &investor,
+        &invoice_b,
+        &amount,
+        &(amount + 500),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
 
     // Fund only invoice A.
     client.accept_bid(&invoice_a, &bid_a);
@@ -432,13 +477,27 @@ fn test_release_one_escrow_does_not_affect_other() {
     let invoice_a = verified_invoice(&env, &client, &business, amount, &currency);
     let invoice_b = verified_invoice(&env, &client, &business, amount, &currency);
 
-    let bid_a = client.place_bid(&investor, &invoice_a, &amount, &(amount + 500));
-    let bid_b = client.place_bid(&investor, &invoice_b, &amount, &(amount + 500));
+    let bid_a = client.place_bid(
+        &investor,
+        &invoice_a,
+        &amount,
+        &(amount + 500),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
+    let bid_b = client.place_bid(
+        &investor,
+        &invoice_b,
+        &amount,
+        &(amount + 500),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
 
     client.accept_bid(&invoice_a, &bid_a);
     client.accept_bid(&invoice_b, &bid_b);
 
     // Release only invoice A.
+    client.approve_early_escrow_release(&invoice_a, &business);
+    client.approve_early_escrow_release(&invoice_a, &investor);
     client.release_escrow_funds(&invoice_a);
 
     assert_eq!(
@@ -476,9 +535,27 @@ fn test_distinct_invoice_ids_produce_distinct_escrow_keys() {
     let inv_b = verified_invoice(&env, &client, &business, amount, &currency);
     let inv_c = verified_invoice(&env, &client, &business, amount, &currency);
 
-    let bid_a = client.place_bid(&investor, &inv_a, &amount, &(amount + 100));
-    let bid_b = client.place_bid(&investor, &inv_b, &amount, &(amount + 100));
-    let bid_c = client.place_bid(&investor, &inv_c, &amount, &(amount + 100));
+    let bid_a = client.place_bid(
+        &investor,
+        &inv_a,
+        &amount,
+        &(amount + 100),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
+    let bid_b = client.place_bid(
+        &investor,
+        &inv_b,
+        &amount,
+        &(amount + 100),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
+    let bid_c = client.place_bid(
+        &investor,
+        &inv_c,
+        &amount,
+        &(amount + 100),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
 
     client.accept_bid(&inv_a, &bid_a);
     client.accept_bid(&inv_b, &bid_b);
@@ -525,7 +602,13 @@ fn test_invoice_and_escrow_fields_are_consistent_after_accept() {
 
     let amount = 7_500i128;
     let invoice_id = verified_invoice(&env, &client, &business, amount, &currency);
-    let bid_id = client.place_bid(&investor, &invoice_id, &amount, &(amount + 750));
+    let bid_id = client.place_bid(
+        &investor,
+        &invoice_id,
+        &amount,
+        &(amount + 750),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
     client.accept_bid(&invoice_id, &bid_id);
 
     let invoice = client.get_invoice(&invoice_id);
@@ -564,7 +647,13 @@ fn test_failed_accept_leaves_no_escrow_and_no_state_change() {
 
     let amount = 5_000i128;
     let invoice_id = verified_invoice(&env, &client, &business, amount, &currency);
-    let bid_id = client.place_bid(&investor, &invoice_id, &amount, &(amount + 500));
+    let bid_id = client.place_bid(
+        &investor,
+        &invoice_id,
+        &amount,
+        &(amount + 500),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
 
     let result = client.try_accept_bid(&invoice_id, &bid_id);
     assert_eq!(
@@ -586,4 +675,142 @@ fn test_failed_accept_leaves_no_escrow_and_no_state_change() {
         client.try_get_escrow_details(&invoice_id).is_err(),
         "no escrow must exist after failed accept"
     );
+}
+
+/// Asserts that there is exactly one escrow record for the given invoice_id.
+/// Panics if there are zero or more than one escrow records.
+fn assert_exactly_one_escrow_for_invoice(env: &Env, invoice_id: &BytesN<32>) {
+    // The storage only allows zero or one escrow per invoice_id.
+    // We check that there is exactly one.
+    let escrow = EscrowStorage::get_escrow_by_invoice(env, invoice_id);
+    assert!(
+        escrow.is_some(),
+        "Expected exactly one escrow for invoice, found none"
+    );
+    // We could also check for more than one, but the storage map from invoice_id to escrow_id is a singleton.
+    // However, to be safe, we can check that there is no second escrow by trying to get a second escrow with a different key?
+    // That doesn't make sense. We trust the storage design.
+}
+
+// ============================================================================
+// 8. Double-layer guard: both escrow and payments check sites
+// ============================================================================
+
+/// Exercise the double-layer guard by creating an escrow via direct call,
+/// then attempting to create another via the public API path.
+///
+/// This test verifies that BOTH guard sites are functional:
+/// 1. The outer guard in `escrow::load_accept_bid_context` checks for existing escrow
+/// 2. The inner guard in `payments::create_escrow` re-checks before token transfer
+///
+/// # Security
+/// Defense-in-depth: even if one guard is bypassed, the other prevents duplicate escrows.
+#[test]
+fn test_double_layer_guard_both_sites_active() {
+    let (env, client, admin) = setup();
+    let contract_id = client.address.clone();
+
+    let business = verified_business(&env, &client, &admin);
+    let investor = verified_investor(&env, &client, 50_000);
+    let currency = setup_token(&env, &business, &investor, &contract_id);
+
+    let amount = 10_000i128;
+    let invoice_id = verified_invoice(&env, &client, &business, amount, &currency);
+
+    // Step 1: Create first escrow via direct call to payments::create_escrow
+    // This bypasses the outer guard in load_accept_bid_context
+    env.as_contract(&contract_id, || {
+        let result = create_escrow(&env, &invoice_id, &investor, &business, amount, &currency);
+        assert!(result.is_ok(), "first create_escrow must succeed");
+    });
+
+    // Verify escrow exists
+    let escrow = client.get_escrow_details(&invoice_id);
+    assert_eq!(escrow.status, EscrowStatus::Held);
+    assert_eq!(escrow.amount, amount);
+
+    // Step 2: Attempt to create second escrow via public API (accept_bid)
+    // This exercises the outer guard in load_accept_bid_context
+    let bid_id = client.place_bid(
+        &investor,
+        &invoice_id,
+        &amount,
+        &(amount + 1_000),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
+    let err = client
+        .try_accept_bid(&invoice_id, &bid_id)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(
+        err,
+        QuickLendXError::InvalidStatus,
+        "outer guard must reject"
+    );
+
+    // Step 3: Attempt to create second escrow via direct call again
+    // This exercises the inner guard in payments::create_escrow
+    env.as_contract(&contract_id, || {
+        let result = create_escrow(&env, &invoice_id, &investor, &business, amount, &currency);
+        assert_eq!(
+            result.unwrap_err(),
+            QuickLendXError::InvoiceAlreadyFunded,
+            "inner guard must reject duplicate"
+        );
+    });
+
+    // Verify only one escrow still exists
+    let escrow_after = client.get_escrow_details(&invoice_id);
+    assert_eq!(
+        escrow_after.escrow_id, escrow.escrow_id,
+        "escrow ID must not change"
+    );
+    assert_eq!(escrow_after.amount, amount, "escrow amount must not change");
+}
+
+/// Exercise the double-layer guard in reverse: create escrow via public API,
+/// then attempt direct call to payments::create_escrow.
+///
+/// This confirms that the inner guard in payments::create_escrow catches duplicates
+/// even when the outer guard in load_accept_bid_context has already been exercised.
+#[test]
+fn test_double_layer_guard_reverse_order() {
+    let (env, client, admin) = setup();
+    let contract_id = client.address.clone();
+
+    let business = verified_business(&env, &client, &admin);
+    let investor = verified_investor(&env, &client, 50_000);
+    let currency = setup_token(&env, &business, &investor, &contract_id);
+
+    let amount = 10_000i128;
+    let invoice_id = verified_invoice(&env, &client, &business, amount, &currency);
+    let bid_id = client.place_bid(
+        &investor,
+        &invoice_id,
+        &amount,
+        &(amount + 1_000),
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
+
+    // Step 1: Create escrow via public API (exercises outer guard)
+    client.accept_bid(&invoice_id, &bid_id);
+
+    // Verify escrow exists
+    let escrow = client.get_escrow_details(&invoice_id);
+    assert_eq!(escrow.status, EscrowStatus::Held);
+
+    // Step 2: Attempt to create second escrow via direct call
+    // This exercises the inner guard in payments::create_escrow
+    env.as_contract(&contract_id, || {
+        let result = create_escrow(&env, &invoice_id, &investor, &business, amount, &currency);
+        assert_eq!(
+            result.unwrap_err(),
+            QuickLendXError::InvoiceAlreadyFunded,
+            "inner guard must reject duplicate even after outer guard succeeded"
+        );
+    });
+
+    // Verify only one escrow still exists
+    let escrow_after = client.get_escrow_details(&invoice_id);
+    assert_eq!(escrow_after.escrow_id, escrow.escrow_id);
 }

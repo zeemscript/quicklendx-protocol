@@ -9,6 +9,16 @@ jest.mock('../src/services/notificationService', () => ({
   },
 }));
 
+// Mock the settlement orchestrator to avoid DB dependency
+jest.mock('../src/services/settlementOrchestrator', () => ({
+  settlementOrchestrator: {
+    createPending: jest.fn(),
+    startProcessing: jest.fn(),
+    completeProcessing: jest.fn(),
+    failProcessing: jest.fn(),
+  },
+}));
+
 import { notificationService } from '../src/services/notificationService';
 
 describe("EventProcessor", () => {
@@ -42,6 +52,35 @@ describe("EventProcessor", () => {
         amount: "1000",
         timestamp: 1234567890,
       });
+    });
+
+    it("clears the deduplication marker after notification failure so retries work", async () => {
+      mockNotificationService.processNotification.mockRejectedValueOnce(
+        new Error("notification unavailable")
+      );
+
+      await expect(
+        eventProcessor.processInvoiceSettled(
+          "retry-event",
+          "inv123",
+          "business456",
+          "investor789",
+          "1000",
+          1234567890
+        )
+      ).rejects.toThrow("notification unavailable");
+
+      mockNotificationService.processNotification.mockResolvedValueOnce(undefined);
+      await eventProcessor.processInvoiceSettled(
+        "retry-event",
+        "inv123",
+        "business456",
+        "investor789",
+        "1000",
+        1234567890
+      );
+
+      expect(mockNotificationService.processNotification).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -190,15 +229,13 @@ describe("EventProcessor", () => {
       });
     });
 
-    it("should ignore unknown event types", async () => {
+    it("should throw on unknown event types", async () => {
       const event = {
         type: "UnknownEvent",
         id: "unknown123",
         timestamp: 1234567894,
       };
-
-      await eventProcessor.processEvent(event);
-
+      await expect(eventProcessor.processEvent(event)).rejects.toThrow(/Unknown event type/);
       expect(mockNotificationService.processNotification).not.toHaveBeenCalled();
     });
   });
