@@ -9,7 +9,10 @@ const isAllowedOrigin = (originHeader: string | undefined): boolean => {
     return true;
   }
 
-  return allowedBrowserOrigins.includes(originHeader);
+  return (
+    allowedBrowserOrigins.includes("*") ||
+    allowedBrowserOrigins.includes(originHeader)
+  );
 };
 
 const isJsonContentType = (contentType: string | undefined): boolean => {
@@ -30,6 +33,29 @@ export const csrfMiddleware = (
     return;
   }
 
+  // Exempt machine-to-machine webhook ingress paths
+  const path = req.path || "";
+  if (
+    path.startsWith("/api/webhooks") ||
+    path.includes("/webhooks/ingest")
+  ) {
+    next();
+    return;
+  }
+
+  // Exempt API-key authenticated requests (admin/keys or general api-keys)
+  const authHeader = req.headers["authorization"];
+  const hasApiKeyHeader = req.headers["x-api-key"] !== undefined;
+  const hasBearerApiKey = typeof authHeader === "string" && authHeader.startsWith("Bearer qlx_");
+
+  if (hasApiKeyHeader || hasBearerApiKey) {
+    next();
+    return;
+  }
+
+  // Browser-driven write requests validation:
+
+  // 1. Verify Origin header if present
   const originHeader =
     typeof req.headers.origin === "string" ? req.headers.origin : undefined;
   if (!isAllowedOrigin(originHeader)) {
@@ -42,6 +68,24 @@ export const csrfMiddleware = (
     return;
   }
 
+  // 2. Verify custom CSRF token header.
+  // The token is required only for browser-driven requests (those that carry
+  // an Origin header): browsers always attach Origin to state-changing
+  // fetches, while machine-to-machine clients send neither Origin nor token
+  // and are not subject to cross-site request forgery. Content-type and
+  // origin checks below still apply to every non-exempt request.
+  const csrfToken = req.headers["x-csrf-token"];
+  if (originHeader !== undefined && !csrfToken) {
+    res.status(403).json({
+      error: {
+        message: "Missing CSRF token",
+        code: "MISSING_CSRF_TOKEN",
+      },
+    });
+    return;
+  }
+
+  // 3. Verify Content-Type is application/json
   const contentTypeHeader =
     typeof req.headers["content-type"] === "string"
       ? req.headers["content-type"]
@@ -59,3 +103,4 @@ export const csrfMiddleware = (
 
   next();
 };
+

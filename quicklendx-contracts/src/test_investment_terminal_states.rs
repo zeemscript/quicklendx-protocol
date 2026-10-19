@@ -1,4 +1,4 @@
-//! Investment terminal state transition tests for QuickLendX protocol.
+﻿//! Investment terminal state transition tests for QuickLendX protocol.
 //!
 //! Test suite validates allowed transitions into terminal investment statuses
 //! and matching invoice side effects as required by issue #717.
@@ -58,7 +58,7 @@ fn setup_funded_investment_for_terminal_tests(
         &String::from_str(env, "Test invoice for terminal states"),
         &InvoiceCategory::Services,
         &Vec::new(env),
-    );
+        &None);
     client.verify_invoice(&invoice_id);
 
     // Setup investor KYC and verification
@@ -66,7 +66,7 @@ fn setup_funded_investment_for_terminal_tests(
     client.verify_investor(&admin, investor, &investment_amount);
 
     // Place and accept bid to create investment
-    let bid_id = client.place_bid(investor, &invoice_id, &investment_amount, &invoice_amount);
+    let bid_id = client.place_bid(investor, &invoice_id, &investment_amount, &invoice_amount, &BytesN::from_array(&env, &[0u8; 32]));
     client.accept_bid(&invoice_id, &bid_id);
 
     (invoice_id, bid_id)
@@ -121,7 +121,7 @@ fn test_investment_completion_flow() {
     assert!(investment_is_in_active_index(&env, &investment.investment_id));
     
     // Settle invoice to trigger investment completion
-    client.settle_invoice(&invoice_id, &invoice_amount);
+    client.settle_invoice(&invoice_id, &invoice_amount, &client.get_investment(&invoice_id).unwrap());
     
     // Verify terminal state
     let updated_investment = get_investment_by_invoice(&env, &invoice_id);
@@ -295,9 +295,45 @@ fn test_investment_refund_flow() {
     // Verify invoice state
     let invoice = client.get_invoice(&invoice_id);
     assert_eq!(invoice.status, InvoiceStatus::Refunded);
-    
+
     // Verify refund events
     assert!(has_event_with_topic(&env, symbol_short!("esc_ref"))); // Escrow refunded
+}
+
+/// Test: Active-index query never returns terminal investments
+#[test]
+fn test_active_index_excludes_terminal_investments() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000_000);
+
+    let contract_id = env.register(QuickLendXContract, ());
+    let client = QuickLendXContractClient::new(&env, &contract_id);
+
+    let business = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let currency = init_currency_for_test(&env, &contract_id, &business, &investor);
+
+    let invoice_amount = 1000i128;
+    let investment_amount = 1000i128;
+
+    let (invoice_id, _bid_id) = setup_funded_investment_for_terminal_tests(
+        &env,
+        &client,
+        &business,
+        &investor,
+        &currency,
+        invoice_amount,
+        investment_amount,
+    );
+
+    client.refund_escrow_funds(&invoice_id);
+    let active_ids = InvestmentStorage::get_active_investment_ids(&env);
+    for active_id in active_ids.iter() {
+        let investment = InvestmentStorage::get_investment(&env, &active_id).unwrap();
+        assert_eq!(investment.status, InvestmentStatus::Active);
+    }
+    assert_eq!(active_ids.len(), 0, "terminal investments must not appear in get_active_investment_ids");
 }
 
 /// Test invalid terminal state transitions (should fail)
@@ -329,7 +365,7 @@ fn test_invalid_terminal_transitions() {
     );
     
     // Complete the investment
-    client.settle_invoice(&invoice_id, &invoice_amount);
+    client.settle_invoice(&invoice_id, &invoice_amount, &client.get_investment(&invoice_id).unwrap());
     
     // Verify investment is Completed
     let investment = get_investment_by_invoice(&env, &invoice_id);
@@ -441,7 +477,7 @@ fn test_investment_storage_invariants() {
     assert!(InvestmentStorage::validate_no_orphan_investments(&env));
     
     // Complete investment
-    client.settle_invoice(&invoice_id, &invoice_amount);
+    client.settle_invoice(&invoice_id, &invoice_amount, &client.get_investment(&invoice_id).unwrap());
     
     // Verify post-transition invariants
     assert!(!investment_is_in_active_index(&env, &investment.investment_id));
@@ -504,3 +540,4 @@ fn has_event_with_topic(env: &Env, topic: soroban_sdk::Symbol) -> bool {
 
     false
 }
+

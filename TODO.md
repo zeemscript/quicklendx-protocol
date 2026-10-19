@@ -1,25 +1,23 @@
-# Pause / Emergency Mode Hardening — Implementation Tracker
+# CI Test Fix TODO
 
-## Plan
-Define and test what happens under paused/emergency modes: which user flows are blocked and which recovery flows remain allowed, with explicit documentation and regression tests.
+## Failures to fix (9 total)
 
----
+### [x] 1. `profits.rs` - test_investor_platform_treasury_sum_invariant
+   - [x] Replace `PlatformFee::calculate_breakdown(&env, ...)` with `calculate_breakdown_with_fee_bps(..., 200)` (pure function, no storage access)
 
-## Steps
+### [x] 2. `payments.rs` - transfer_funds MIN_TRANSFER validation
+   - [x] Add MIN_TRANSFER check in `transfer_funds` function
 
-- [x] 1. Fix `pause.rs` — remove unconditional `Ok(())` in `require_not_paused`
-- [x] 2. Fix `emergency.rs` — remove erroneous storage remove in `cancel()`
-- [x] 3. Harden `lib.rs` — add missing pause guards to state-mutating entrypoints + expose emergency helper entrypoints
-- [x] 4. Rewrite / extend `test_pause.rs` — fix error expectations (OperationNotAllowed → ContractPaused), add regression tests
-- [x] 5. Create `test_emergency.rs` — comprehensive emergency-mode behavior tests
-- [x] 6. Create `docs/contracts/emergency.md` — explicit documentation
-- [x] 7. Final validation — `cargo check` and `cargo test`
+### [x] 3. `payments.rs` - Non-existent token address handling
+   - [x] Handle `token_client.balance(from)` failure gracefully (unregistered token)
 
----
+### [x] 4. `lib.rs` - get_escrow_status unwrap
+   - [x] Replace `.unwrap()` with `.ok_or(QuickLendXError::StorageKeyNotFound)?`
 
-## Files Modified
-- `quicklendx-contracts/src/lib.rs`
-- `quicklendx-contracts/src/test_pause.rs`
-- `quicklendx-contracts/src/test_emergency.rs` (new)
-- `docs/contracts/emergency.md` (new)
+### [x] 5. `test_cancel_invoice_matrix.rs` - Invoice::new outside contract
+   - [x] Register a contract and wrap `Invoice::new()` in `env.as_contract()`
+
+## Verification
+- [ ] Run `cargo test -p quicklendx-contracts --lib` to verify all 9 tests pass
+- [ ] Run `cargo clippy --workspace --all-targets -- -D warnings`
 

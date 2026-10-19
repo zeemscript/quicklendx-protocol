@@ -144,6 +144,43 @@ pub struct Escrow {
 3. **Balance/allowance prechecks:** `transfer_funds` inspects token state before invoking any transfer, preventing the protocol from entering an inconsistent partial-transfer state.
 4. **Idempotency:** `release_escrow` and `refund_escrow` require `Held` status; once updated to `Released` or `Refunded`, repeated calls return `InvalidStatus`.
 
+### Payment Capping and Replay Protection
+
+**See:** `src/settlement.rs` for implementation; `src/test_fuzz.rs` for fuzz tests.
+
+The settlement layer provides hardened payment recording with the following security guarantees:
+
+| Invariant | Implementation | Test Coverage |
+|-----------|----------------|---------------|
+| `total_paid <= total_due` | `record_payment` caps `applied_amount = min(requested, remaining_due)` | `fuzz_payment_capping_invariant`, `test_overpayment_is_capped_at_total_due` |
+| `(invoice_id, nonce)` uniqueness | `PaymentNonce` durable storage rejects duplicates idempotently | `fuzz_repeated_nonce_replay_protection`, `test_duplicate_transaction_id_is_deduplicated` |
+| `payment_count <= MAX_PAYMENT_COUNT` | Guard rejects at `1_000` payment limit | `fuzz_payment_count_exhaustion`, `test_payment_count_cap_is_enforced` |
+
+**Security Note:** Overpayment attempts (amount > remaining_due) are silently capped. The recorded amount reflects what was applied, never the requested excess. This design prevents callers from accidentally or maliciously exceeding the invoice balance.
+
+**Replay Protection Semantics:**
+- Non-empty nonces are checked against durable storage before recording.
+- Duplicate nonces return `DuplicateNonce` and write no payment, ledger, event, or audit record.
+- `transaction_id` must be a 64-character hex string (`InvalidTransactionHash` otherwise).
+
+### Repayment allocation, late penalty, and observability
+
+Public repayment is `process_partial_payment` / `make_payment` → `record_payment` → (when `total_paid` covers `total_due` and no dispute) `settle_invoice_internal`.
+
+**Waterfall** on cumulative `total_paid` (checked arithmetic, floor BPS):
+
+1. Principal = `min(total_paid, investment)`
+2. Contractual profit pool = `min(remainder, max(0, invoice.amount - investment))`, split `platform_fee = floor(pool * fee_bps / 10_000)`, `investor_profit = pool - platform_fee`
+3. Investor late penalty = `min(remainder, assessed_late)`
+
+Conservation: `principal + investor_profit + platform_fee + late_penalty == total_paid`. Final disbursement uses this ledger (late is not treated as fee-able profit).
+
+**Late assessment (once):** on the first committed payment with `timestamp > due_date` and `late_payment_penalty_bps = Some(bps > 0)`, `assessed_late = floor(remaining_contractual_due * bps / 10_000)` where remaining contractual due is `invoice.amount - total_paid` before that payment. Later payments never re-price it. `total_due` becomes `invoice.amount + assessed_late`. `None` or `0` preserves `total_due == invoice.amount`.
+
+**Events (success only, after storage commit):** `pay_rec` → `partial_payment` → additive `repayment_allocated` (schema v1, `operation_id`, phase `Committed`) → if final: escrow release / `InvoiceSettled` / `inv_stlf`. The `PaymentProcessed` audit entry uses the same `operation_id`.
+
+`payments::repay_escrow` is not a public entry point and is not used by this path.
+
 ## NatSpec-Style Documentation
 
 All public items in `payments.rs` carry Rust doc comments that serve as NatSpec-style documentation:

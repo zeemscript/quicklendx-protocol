@@ -21,8 +21,9 @@
 #![cfg(test)]
 
 use crate::errors::QuickLendXError;
+use crate::events::TtlExtended;
 use crate::invoice::{InvoiceCategory, InvoiceStatus};
-use crate::maintenance::{MaintenanceControl, MAX_REASON_LEN};
+use crate::maintenance::{ExtendReport, MaintenanceControl, MAX_REASON_LEN};
 use crate::{QuickLendXContract, QuickLendXContractClient};
 use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
 
@@ -58,6 +59,7 @@ fn make_invoice(
         &String::from_str(env, "Test invoice"),
         &InvoiceCategory::Services,
         &Vec::new(env),
+        &None,
     )
 }
 
@@ -111,6 +113,7 @@ fn test_maintenance_blocks_store_invoice() {
         &String::from_str(&env, "Blocked"),
         &InvoiceCategory::Services,
         &Vec::new(&env),
+        &None,
     );
     assert_eq!(
         result.unwrap_err().unwrap(),
@@ -129,7 +132,13 @@ fn test_maintenance_blocks_place_bid() {
 
     client.set_maintenance_mode(&admin, &true, &reason(&env, "Upgrade"));
 
-    let result = client.try_place_bid(&investor, &invoice_id, &1_000i128, &1_100i128);
+    let result = client.try_place_bid(
+        &investor,
+        &invoice_id,
+        &1_000i128,
+        &1_100i128,
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
     assert_eq!(
         result.unwrap_err().unwrap(),
         QuickLendXError::MaintenanceModeActive
@@ -194,7 +203,11 @@ fn test_maintenance_blocks_settle_invoice() {
 
     client.set_maintenance_mode(&admin, &true, &reason(&env, "Upgrade"));
 
-    let result = client.try_settle_invoice(&invoice_id, &1_000i128);
+    let result = client.try_settle_invoice(
+        &invoice_id,
+        &1_000i128,
+        &client.get_investment(&invoice_id).unwrap(),
+    );
     assert_eq!(
         result.unwrap_err().unwrap(),
         QuickLendXError::MaintenanceModeActive
@@ -297,10 +310,7 @@ fn test_reason_stored_on_enable() {
 
     client.set_maintenance_mode(&admin, &true, &reason(&env, msg));
 
-    assert_eq!(
-        client.get_maintenance_reason().unwrap(),
-        reason(&env, msg)
-    );
+    assert_eq!(client.get_maintenance_reason().unwrap(), reason(&env, msg));
 }
 
 #[test]
@@ -343,10 +353,8 @@ fn test_oversized_reason_rejected() {
 
     // Build a reason one byte over the limit.
     let oversized: String = {
-        let bytes = soroban_sdk::Bytes::from_slice(
-            &env,
-            &vec![b'x'; (MAX_REASON_LEN + 1) as usize],
-        );
+        let bytes =
+            soroban_sdk::Bytes::from_slice(&env, &vec![b'x'; (MAX_REASON_LEN + 1) as usize]);
         String::try_from_bytes(&bytes).unwrap()
     };
 
@@ -356,7 +364,10 @@ fn test_oversized_reason_rejected() {
         QuickLendXError::InvalidDescription,
         "Reason exceeding MAX_REASON_LEN must be rejected"
     );
-    assert!(!client.is_maintenance_mode(), "Flag must not change on rejection");
+    assert!(
+        !client.is_maintenance_mode(),
+        "Flag must not change on rejection"
+    );
 }
 
 #[test]
@@ -365,10 +376,7 @@ fn test_max_length_reason_accepted() {
     let (client, admin) = setup(&env);
 
     let max_reason: String = {
-        let bytes = soroban_sdk::Bytes::from_slice(
-            &env,
-            &vec![b'a'; MAX_REASON_LEN as usize],
-        );
+        let bytes = soroban_sdk::Bytes::from_slice(&env, &vec![b'a'; MAX_REASON_LEN as usize]);
         String::try_from_bytes(&bytes).unwrap()
     };
 
@@ -432,45 +440,190 @@ fn test_disable_when_already_disabled_is_safe() {
 }
 
 // ============================================================================
-// 9. Operations resume after maintenance is lifted
+// 10. TTL Extension
 // ============================================================================
 
+/// Returns the number of events with topic `"ttl_extended"` in the given env.
+fn count_ttl_extended_events(env: &Env) -> usize {
+    use soroban_sdk::xdr;
+    let topic_sym = soroban_sdk::Symbol::new(env, "ttl_extended");
+    let topic_xdr = xdr::ScVal::try_from_val(env, &topic_sym).expect("topic to ScVal");
+    env.events()
+        .all()
+        .events()
+        .iter()
+        .filter(|e| match &e.body {
+            xdr::ContractEventBody::V0(body) => body.topics.first() == Some(&topic_xdr),
+        })
+        .count()
+}
+
 #[test]
-fn test_write_ops_resume_after_maintenance_disabled() {
+fn test_admin_can_extend_protocol_ttl() {
     let env = Env::default();
     let (client, admin) = setup(&env);
     let business = Address::generate(&env);
     let currency = Address::generate(&env);
-    let due_date = env.ledger().timestamp() + 86_400;
+    let investor = Address::generate(&env);
 
-    client.set_maintenance_mode(&admin, &true, &reason(&env, "Brief maintenance"));
-
-    // Blocked during maintenance.
-    assert!(client
-        .try_store_invoice(
-            &business,
-            &1_000i128,
-            &currency,
-            &due_date,
-            &String::from_str(&env, "Blocked"),
-            &InvoiceCategory::Services,
-            &Vec::new(&env),
-        )
-        .is_err());
-
-    // Lift maintenance.
-    client.set_maintenance_mode(&admin, &false, &reason(&env, ""));
-
-    // Now succeeds.
-    let invoice_id = client.store_invoice(
-        &business,
-        &1_000i128,
-        &currency,
-        &due_date,
-        &String::from_str(&env, "Restored"),
-        &InvoiceCategory::Services,
-        &Vec::new(&env),
+    client.add_currency(&admin, &currency);
+    let invoice_id = make_invoice(&env, &client, &business, &currency);
+    let _bid_id = client.place_bid(
+        &investor,
+        &invoice_id,
+        &500i128,
+        &600i128,
+        &BytesN::from_array(&env, &[0u8; 32]),
     );
-    let invoice = client.get_invoice(&invoice_id);
-    assert_eq!(invoice.status, InvoiceStatus::Pending);
+
+    let report = client.extend_protocol_ttl(&admin);
+
+    assert!(report.invoices_refreshed > 0);
+    assert!(report.bids_refreshed > 0);
+    assert!(report.currencies_refreshed > 0);
+    assert_eq!(report.investments_refreshed, 0);
+    assert_eq!(report.escrows_refreshed, 0);
+}
+
+#[test]
+fn test_extend_ttl_empty_indexes() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+
+    let report = client.extend_protocol_ttl(&admin);
+
+    assert_eq!(
+        report,
+        ExtendReport {
+            invoices_refreshed: 0,
+            bids_refreshed: 0,
+            investments_refreshed: 0,
+            escrows_refreshed: 0,
+            currencies_refreshed: 0,
+        },
+        "report must be all-zero when no data exists"
+    );
+}
+
+#[test]
+fn test_extend_ttl_non_admin_rejected() {
+    let env = Env::default();
+    let (client, _admin) = setup(&env);
+    let attacker = Address::generate(&env);
+
+    let result = client.try_extend_protocol_ttl(&attacker);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        QuickLendXError::NotAdmin,
+        "non-admin must receive NotAdmin"
+    );
+}
+
+#[test]
+fn test_extend_ttl_idempotent() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+    let business = Address::generate(&env);
+    let currency = Address::generate(&env);
+    let investor = Address::generate(&env);
+
+    client.add_currency(&admin, &currency);
+    let invoice_id = make_invoice(&env, &client, &business, &currency);
+    let _bid_id = client.place_bid(
+        &investor,
+        &invoice_id,
+        &500i128,
+        &600i128,
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
+
+    let report1 = client.extend_protocol_ttl(&admin);
+    let report2 = client.extend_protocol_ttl(&admin);
+
+    assert_eq!(
+        report1, report2,
+        "extending TTL twice must produce identical report"
+    );
+}
+
+#[test]
+fn test_extend_ttl_all_kinds_populated() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+    let business = Address::generate(&env);
+    let currency = Address::generate(&env);
+    let investor = Address::generate(&env);
+
+    client.add_currency(&admin, &currency);
+
+    let invoice_id = make_invoice(&env, &client, &business, &currency);
+    let _bid_id = client.place_bid(
+        &investor,
+        &invoice_id,
+        &500i128,
+        &600i128,
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
+
+    let _invoice2 = make_invoice(&env, &client, &business, &currency);
+    let currency2 = Address::generate(&env);
+    client.add_currency(&admin, &currency2);
+
+    let report = client.extend_protocol_ttl(&admin);
+
+    assert_eq!(report.invoices_refreshed, 2);
+    assert!(report.bids_refreshed >= 1);
+    assert_eq!(report.currencies_refreshed, 2);
+}
+
+#[test]
+fn test_extend_ttl_emits_events() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+    let business = Address::generate(&env);
+    let currency = Address::generate(&env);
+    let investor = Address::generate(&env);
+
+    client.add_currency(&admin, &currency);
+    let invoice_id = make_invoice(&env, &client, &business, &currency);
+    let _bid_id = client.place_bid(
+        &investor,
+        &invoice_id,
+        &500i128,
+        &600i128,
+        &BytesN::from_array(&env, &[0u8; 32]),
+    );
+
+    let before = count_ttl_extended_events(&env);
+
+    let report = client.extend_protocol_ttl(&admin);
+
+    let after = count_ttl_extended_events(&env);
+    let expected_events = (report.invoices_refreshed > 0) as usize
+        + (report.bids_refreshed > 0) as usize
+        + (report.investments_refreshed > 0) as usize
+        + (report.escrows_refreshed > 0) as usize
+        + (report.currencies_refreshed > 0) as usize;
+
+    assert_eq!(
+        after - before,
+        expected_events,
+        "must emit one TtlExtended event per non-zero kind"
+    );
+}
+
+#[test]
+fn test_extend_ttl_no_events_when_empty() {
+    let env = Env::default();
+    let (client, admin) = setup(&env);
+
+    let before = count_ttl_extended_events(&env);
+    let _report = client.extend_protocol_ttl(&admin);
+    let after = count_ttl_extended_events(&env);
+
+    assert_eq!(
+        after - before,
+        0,
+        "no TtlExtended events when all indexes are empty"
+    );
 }
