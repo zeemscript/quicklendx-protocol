@@ -4,17 +4,18 @@ import { eventProcessor } from "./eventProcessor";
 import { DefaultEventValidator } from "./eventValidator";
 import { InMemoryRawEventStore } from "./rawEventStore";
 import { InMemoryDerivedTableStore } from "./derivedTableStore";
-import { 
-  ReplayRun, 
-  ReplayStartRequest, 
-  ReplayPreview, 
+import {
+  ReplayRun,
+  ReplayStartRequest,
+  ReplayPreview,
   ReplayAuditEntry,
   ReplayStats,
   RawEventStore,
   DerivedTableStore,
   ReplayRunStatus,
-  ReplayAuditEventType
+  ReplayAuditEventType,
 } from "../types/replay";
+import { SnapshotScheduler } from "./snapshotService";
 
 export class ReplayError extends Error {
   public readonly code: string;
@@ -34,6 +35,8 @@ export class ReplayService {
   private readonly runTimers = new Map<string, NodeJS.Timeout>();
   private readonly auditLogPath: string;
   private failureAtLedger: number | null = null;
+  /** Optional snapshot scheduler wired in after construction. */
+  private snapshotScheduler: SnapshotScheduler | null = null;
 
   private constructor(
     private readonly rawEventStore: RawEventStore,
@@ -52,6 +55,14 @@ export class ReplayService {
       ReplayService.instance = new ReplayService(rawEventStore, derivedTableStore);
     }
     return ReplayService.instance;
+  }
+
+  /**
+   * Wire the SnapshotScheduler so that batch boundaries are signalled for
+   * mid-batch snapshot detection.
+   */
+  public setSnapshotScheduler(scheduler: SnapshotScheduler): void {
+    this.snapshotScheduler = scheduler;
   }
 
   public async startReplay(
@@ -222,6 +233,28 @@ export class ReplayService {
 
   public setFailureAtLedgerForTests(ledger: number | null): void {
     this.failureAtLedger = ledger;
+  }
+
+  public getActiveRetentionLock(): {
+    active: boolean;
+    minimumLedger: number | null;
+    runIds: string[];
+  } {
+    const activeRuns = [...this.runs.values()].filter((run) =>
+      run.status === "pending" || run.status === "running" || run.status === "paused"
+    );
+
+    if (activeRuns.length === 0) {
+      return { active: false, minimumLedger: null, runIds: [] };
+    }
+
+    return {
+      active: true,
+      minimumLedger: Math.min(
+        ...activeRuns.map((run) => Math.max(run.fromLedger, run.cursorLedger))
+      ),
+      runIds: activeRuns.map((run) => run.id),
+    };
   }
 
   private validateRequest(payload: ReplayStartRequest): void {
@@ -403,6 +436,6 @@ export class ReplayService {
 
 // Create singleton instances for the application
 const eventValidator = new DefaultEventValidator();
-const rawEventStore = new InMemoryRawEventStore(eventValidator);
-const derivedTableStore = new InMemoryDerivedTableStore();
+export const rawEventStore = new InMemoryRawEventStore(eventValidator);
+export const derivedTableStore = new InMemoryDerivedTableStore();
 export const replayService = ReplayService.getInstance(rawEventStore, derivedTableStore);

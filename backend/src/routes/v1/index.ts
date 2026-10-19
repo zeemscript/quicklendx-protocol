@@ -9,20 +9,37 @@ import exportRoutes from "./exports";
 import notificationRoutes from "./notifications";
 import adminRoutes from "./admin";
 import monitoringRoutes from "./monitoring";
+import reconciliationRoutes from "./reconciliation";
 import { lagMonitor } from "../../services/lagMonitor";
 import { degradedGuard } from "../../middleware/degraded-guard";
+import { eventProcessor } from "../../services/eventProcessor";
+import {
+  DefaultEventValidator,
+  getStableEventId,
+  validateEventBatch,
+  EventValidationResult,
+  SorobanEvent,
+} from "../../services/eventValidator";
+import { FileRawEventStore } from "../../services/rawEventStore";
+import { getRateLimitPolicies } from "../../middleware/rate-limit";
+import { eventIngestLimits } from "../../middleware/event-ingest-limits";
 
 const router = Router();
+const eventIdStore = new FileRawEventStore(new DefaultEventValidator());
 
 router.use("/invoices", invoiceRoutes);
 router.use("/bids", bidRoutes);
 router.use("/settlements", settlementRoutes);
+// FIX: portfolioRoutes was imported but never mounted – /portfolio always returned 404.
+// This was a drift between openapi.yaml (which documents /portfolio) and the live routes.
+router.use("/portfolio", portfolioRoutes);
 router.use("/test-errors", testErrorRoutes);
 router.use("/webhooks", webhookRoutes);
 router.use("/notifications", notificationRoutes);
 router.use("/exports", exportRoutes);
 router.use("/admin", adminRoutes);
 router.use("/admin/monitoring", monitoringRoutes);
+router.use("/reconciliation", reconciliationRoutes);
 
 // ---------------------------------------------------------------------------
 // System status endpoint
@@ -31,7 +48,10 @@ router.use("/admin/monitoring", monitoringRoutes);
 router.get("/status", async (req, res, next) => {
   try {
     const lagStatus = await lagMonitor.getLagStatus();
-    res.json(lagStatus);
+    res.json({
+      ...lagStatus,
+      rateLimits: getRateLimitPolicies(),
+    });
   } catch (err) {
     next(err);
   }
@@ -62,16 +82,94 @@ router.post(
 );
 
 // Event processing endpoint (for indexer to post events)
-router.post("/events", async (req, res) => {
+router.post("/events", ...eventIngestLimits, async (req, res) => {
   try {
-    const { eventProcessor } = await import("../../services/eventProcessor");
     const events = Array.isArray(req.body) ? req.body : [req.body];
+    const validation = validateEventBatch(events);
 
-    for (const event of events) {
-      await eventProcessor.processEvent(event);
+    if (validation.errors) {
+      res.status(400).json({
+        success: false,
+        processed: 0,
+        results: validation.errors.map((error) => ({
+          status: "rejected",
+          error,
+        })),
+      });
+      return;
     }
 
-    res.json({ success: true, processed: events.length });
+    const response: Array<{
+      index: number;
+      id?: string;
+      type?: string;
+      status: "processed" | "duplicate" | "rejected" | "failed";
+      errors?: string[];
+      error?: string;
+    }> = [];
+
+    for (let i = 0; i < events.length; i++) {
+      const result = validation.results[i] as EventValidationResult;
+
+      if (!result.success) {
+        response.push({
+          index: i,
+          status: "rejected",
+          errors: result.errors,
+        });
+        continue;
+      }
+
+      const event = result.data;
+      const eventId = getStableEventId(event);
+
+      if (await eventIdStore.hasEventId(eventId)) {
+        response.push({
+          index: i,
+          id: eventId,
+          type: event.type,
+          status: "duplicate",
+        });
+        continue;
+      }
+
+      try {
+        await eventProcessor.processEvent(event);
+        await eventIdStore.storeEvents([event as SorobanEvent]);
+        response.push({
+          index: i,
+          id: eventId,
+          type: event.type,
+          status: "processed",
+        });
+      } catch (err) {
+        response.push({
+          index: i,
+          id: eventId,
+          type: event.type,
+          status: "failed",
+          error: "Processing failed",
+        });
+      }
+    }
+
+    const hasRejected = response.some((r) => r.status === "rejected");
+    const hasFailed = response.some((r) => r.status === "failed");
+    const hasProcessed = response.some((r) => r.status === "processed" || r.status === "duplicate");
+    const processed = response.filter((r) => r.status === "processed").length;
+
+    // Mixed batch (some valid, some invalid) → 400
+    // All invalid or any processing failure → 500
+    // All valid and processed → 200
+    const status = (hasRejected && hasProcessed) ? 400
+      : (hasRejected || hasFailed) ? 500
+      : 200;
+
+    res.status(status).json({
+      success: !hasRejected && !hasFailed,
+      processed,
+      results: response,
+    });
   } catch (error) {
     console.error("Error processing events:", error);
     res.status(500).json({ error: "Internal server error" });

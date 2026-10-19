@@ -1,6 +1,9 @@
 import { Router } from "express";
 import * as exportController from "../../controllers/v1/exports";
 import { requireUserAuth } from "../../middleware/userAuth";
+import { exportRateLimitMiddleware } from "../../middleware/rate-limit";
+import { requireSignature } from "../../middleware/request-signing";
+import { optionalApiKeyAuth } from "../../middleware/api-key-auth";
 
 const router = Router();
 
@@ -23,7 +26,7 @@ const router = Router();
  *       200:
  *         description: Export link generated
  */
-router.post("/generate", requireUserAuth, exportController.requestExport);
+router.post("/generate", exportRateLimitMiddleware, optionalApiKeyAuth, requireUserAuth, requireSignature, exportController.requestExport);
 
 /**
  * @openapi
@@ -41,6 +44,6 @@ router.post("/generate", requireUserAuth, exportController.requestExport);
  *       200:
  *         description: Export file content
  */
-router.get("/download/:token", exportController.downloadExport);
+router.get("/download/:token", exportRateLimitMiddleware, exportController.downloadExport);
 
 export default router;

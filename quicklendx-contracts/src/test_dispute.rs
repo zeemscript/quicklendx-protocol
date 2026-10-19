@@ -49,11 +49,10 @@
 mod test_dispute {
     use crate::errors::QuickLendXError;
     use crate::invoice::{DisputeStatus, InvoiceCategory};
+    use crate::types::DisputeResolution;
+    use crate::verification::validate_evidence_hash;
     use crate::{QuickLendXContract, QuickLendXContractClient};
-    use soroban_sdk::{
-        testutils::{Address as _},
-        Address, BytesN, Env, String, Vec,
-    };
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env, String, Vec};
 
     // -----------------------------------------------------------------------
     // Test helpers
@@ -92,15 +91,18 @@ mod test_dispute {
     ) -> BytesN<32> {
         let currency = Address::generate(env);
         let due_date = env.ledger().timestamp() + 30 * 24 * 60 * 60;
-        client.store_invoice(
-            business,
-            &amount,
-            &currency,
-            &due_date,
-            &String::from_str(env, "Test invoice for dispute"),
-            &InvoiceCategory::Services,
-            &Vec::new(env),
-        ).unwrap()
+        client
+            .store_invoice(
+                business,
+                &amount,
+                &currency,
+                &due_date,
+                &String::from_str(env, "Test invoice for dispute"),
+                &InvoiceCategory::Services,
+                &Vec::new(env),
+                &None,
+            )
+            .unwrap()
     }
 
     // -----------------------------------------------------------------------
@@ -118,18 +120,25 @@ mod test_dispute {
         let evidence = String::from_str(&env, "Supporting documentation provided");
 
         let result = client.try_create_dispute(&invoice_id, &business, &reason, &evidence);
-        assert!(result.is_ok(), "Business should be able to create a dispute");
+        assert!(
+            result.is_ok(),
+            "Business should be able to create a dispute"
+        );
 
         // Verify dispute is stored and status is Disputed
         let invoice = client.get_invoice(&invoice_id);
         assert_eq!(invoice.dispute_status, DisputeStatus::Disputed);
 
-        let dispute = client.get_dispute_details(&invoice_id)
+        let dispute = client
+            .get_dispute_details(&invoice_id)
             .expect("Dispute should exist after creation");
         assert_eq!(dispute.created_by, business);
         assert_eq!(dispute.reason, reason);
         assert_eq!(dispute.evidence, evidence);
-        assert_eq!(dispute.resolved_at, 0, "resolved_at must be zero before resolution");
+        assert_eq!(
+            dispute.resolved_at, 0,
+            "resolved_at must be zero before resolution"
+        );
     }
 
     /// [TC-02] `create_dispute` must reject an invoice ID that does not exist.
@@ -335,7 +344,10 @@ mod test_dispute {
         );
 
         let result = client.try_put_dispute_under_review(&invoice_id, &admin);
-        assert!(result.is_ok(), "Admin should advance dispute to UnderReview");
+        assert!(
+            result.is_ok(),
+            "Admin should advance dispute to UnderReview"
+        );
 
         assert_eq!(
             client.get_invoice(&invoice_id).dispute_status,
@@ -434,7 +446,10 @@ mod test_dispute {
 
         let resolution = String::from_str(&env, "Dispute resolved with partial refund");
         let result = client.try_resolve_dispute(&invoice_id, &admin, &resolution);
-        assert!(result.is_ok(), "Admin should be able to resolve a UnderReview dispute");
+        assert!(
+            result.is_ok(),
+            "Admin should be able to resolve a UnderReview dispute"
+        );
 
         assert_eq!(
             client.get_invoice(&invoice_id).dispute_status,
@@ -482,6 +497,141 @@ mod test_dispute {
         assert_eq!(dispute.evidence, evidence);
         assert_eq!(dispute.resolution, resolution);
         assert_eq!(dispute.resolved_by, admin);
+    }
+
+    /// [TC-20] Admin can resolve a dispute with structured outcome.
+    #[test]
+    fn test_resolve_dispute_structured_success() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+
+        let note = String::from_str(&env, "Dispute resolved in favor of investor");
+        let result = client.try_resolve_dispute_structured(
+            &invoice_id,
+            &admin,
+            &DisputeResolution::FavorInvestor,
+            &note,
+        );
+        assert!(
+            result.is_ok(),
+            "Admin should be able to resolve a UnderReview dispute with structured outcome"
+        );
+
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::Resolved
+        );
+
+        let dispute = client
+            .get_dispute_details(&invoice_id)
+            .expect("Dispute should be stored");
+        assert_eq!(dispute.resolution, note);
+        assert_eq!(dispute.resolved_by, admin);
+        assert_eq!(dispute.resolution_outcome, DisputeResolution::FavorInvestor);
+    }
+
+    /// [TC-21] Resolving a dispute with structured outcome skipping review is rejected.
+    #[test]
+    fn test_resolve_dispute_structured_skipping_review_rejected() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+
+        let result = client.try_resolve_dispute_structured(
+            &invoice_id,
+            &admin,
+            &DisputeResolution::FavorBusiness,
+            &String::from_str(&env, "Skipped review"),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().expect("expected contract error");
+        assert_eq!(
+            err,
+            QuickLendXError::DisputeNotUnderReview,
+            "Cannot resolve a Disputed (not yet reviewed) dispute with structured outcome"
+        );
+    }
+
+    /// [TC-22] Resolving an already-resolved dispute with structured outcome is rejected.
+    #[test]
+    fn test_resolve_dispute_structured_already_resolved_rejected() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+        client.resolve_dispute_structured(
+            &invoice_id,
+            &admin,
+            &DisputeResolution::FavorBusiness,
+            &String::from_str(&env, "First resolution"),
+        );
+
+        let result = client.try_resolve_dispute_structured(
+            &invoice_id,
+            &admin,
+            &DisputeResolution::Dismissed,
+            &String::from_str(&env, "Second resolution"),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().expect("expected contract error");
+        assert_eq!(
+            err,
+            QuickLendXError::DisputeNotUnderReview,
+            "Cannot resolve an already-Resolved dispute with structured outcome"
+        );
+    }
+
+    /// [TC-23] An empty note for structured resolution is rejected.
+    #[test]
+    fn test_resolve_dispute_structured_empty_note_rejected() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+
+        let result = client.try_resolve_dispute_structured(
+            &invoice_id,
+            &admin,
+            &DisputeResolution::Split,
+            &String::from_str(&env, ""),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().expect("expected contract error");
+        assert_eq!(
+            err,
+            QuickLendXError::InvalidDisputeReason,
+            "Empty note for structured resolution should be rejected"
+        );
     }
 
     /// [TC-17] Resolving a `Disputed` (not yet under review) dispute must return
@@ -571,11 +721,7 @@ mod test_dispute {
         );
         client.put_dispute_under_review(&invoice_id, &admin);
 
-        let result = client.try_resolve_dispute(
-            &invoice_id,
-            &admin,
-            &String::from_str(&env, ""),
-        );
+        let result = client.try_resolve_dispute(&invoice_id, &admin, &String::from_str(&env, ""));
         assert!(result.is_err());
         let err = result.unwrap_err().expect("expected contract error");
         assert_eq!(err, QuickLendXError::InvalidDisputeReason);
@@ -980,7 +1126,10 @@ mod test_dispute {
         let before = client
             .get_dispute_details(&invoice_id)
             .expect("Dispute must exist");
-        assert_eq!(before.resolved_at, 0, "resolved_at must be 0 before resolution");
+        assert_eq!(
+            before.resolved_at, 0,
+            "resolved_at must be 0 before resolution"
+        );
 
         client.put_dispute_under_review(&invoice_id, &admin);
         client.resolve_dispute(
@@ -993,7 +1142,10 @@ mod test_dispute {
         let after = client
             .get_dispute_details(&invoice_id)
             .expect("Dispute must exist");
-        assert!(after.resolved_at > 0, "resolved_at must be set after resolution");
+        assert!(
+            after.resolved_at > 0,
+            "resolved_at must be set after resolution"
+        );
         assert_eq!(after.resolved_by, admin, "resolved_by must be the admin");
     }
 
@@ -1099,11 +1251,8 @@ mod test_dispute {
         let business = create_verified_business(&env, &client, &admin);
         let invoice_id = create_test_invoice(&env, &client, &business, 100_000);
 
-        let result = client.try_resolve_dispute(
-            &invoice_id,
-            &admin,
-            &String::from_str(&env, "resolution"),
-        );
+        let result =
+            client.try_resolve_dispute(&invoice_id, &admin, &String::from_str(&env, "resolution"));
         assert!(result.is_err());
         let err = result.unwrap_err().expect("expected contract error");
         assert_eq!(err, QuickLendXError::DisputeNotFound);
@@ -1177,14 +1326,13 @@ mod test_dispute {
             QuickLendXError::InvoiceNotFound
         );
 
-        let resolve_result = client.try_resolve_dispute(
-            &fake_id,
-            &admin,
-            &String::from_str(&env, "resolution"),
-        );
+        let resolve_result =
+            client.try_resolve_dispute(&fake_id, &admin, &String::from_str(&env, "resolution"));
         assert!(resolve_result.is_err());
         assert_eq!(
-            resolve_result.unwrap_err().expect("expected contract error"),
+            resolve_result
+                .unwrap_err()
+                .expect("expected contract error"),
             QuickLendXError::InvoiceNotFound
         );
     }
@@ -1344,12 +1492,17 @@ mod test_dispute {
             &String::from_str(&env, "Resolved after evidence review"),
         );
 
-        let dispute = client.get_dispute_details(&invoice_id).expect("dispute must exist");
+        let dispute = client
+            .get_dispute_details(&invoice_id)
+            .expect("dispute must exist");
         assert_eq!(
             dispute.evidence,
             String::from_str(&env, "Updated supporting evidence")
         );
-        assert_eq!(client.get_invoice(&invoice_id).dispute_status, DisputeStatus::Resolved);
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::Resolved
+        );
     }
 
     /// [TC-45] Evidence updates are creator-only and reject tampering attempts.
@@ -1451,5 +1604,706 @@ mod test_dispute {
         let resolved_ids = client.get_invoices_by_dispute_status(&DisputeStatus::Resolved);
         assert!(resolved_ids.contains(&id1));
         assert!(!resolved_ids.contains(&id2));
+    }
+
+    // -----------------------------------------------------------------------
+    // State-Machine Transition Matrix
+    // -----------------------------------------------------------------------
+    // The table below exhaustively enumerates every (from_state, operation)
+    // pair and asserts that the contract produces the correct result — either
+    // a successful transition to the expected next state, or a typed error
+    // with no state mutation.
+    //
+    // ┌─────────────────┬────────────────────────────┬──────────────────────────┐
+    // │  From State     │  Operation                 │  Expected result         │
+    // ├─────────────────┼────────────────────────────┼──────────────────────────┤
+    // │  None           │  create_dispute            │  → Disputed              │
+    // │  None           │  put_under_review          │  DisputeNotFound         │
+    // │  None           │  resolve_dispute           │  DisputeNotUnderReview   │
+    // │  Disputed       │  create_dispute (dup)      │  DisputeAlreadyExists    │
+    // │  Disputed       │  put_under_review (admin)  │  → UnderReview           │
+    // │  Disputed       │  resolve_dispute           │  DisputeNotUnderReview   │
+    // │  UnderReview    │  create_dispute (dup)      │  DisputeAlreadyExists    │
+    // │  UnderReview    │  put_under_review again    │  InvalidStatus           │
+    // │  UnderReview    │  resolve_dispute (admin)   │  → Resolved              │
+    // │  Resolved       │  create_dispute (dup)      │  DisputeAlreadyExists    │
+    // │  Resolved       │  put_under_review          │  InvalidStatus           │
+    // │  Resolved       │  resolve_dispute (double)  │  DisputeNotUnderReview   │
+    // └─────────────────┴────────────────────────────┴──────────────────────────┘
+
+    // ── None state ──────────────────────────────────────────────────────────
+
+    /// [TC-SM-01] None → create_dispute → Disputed  (valid, covered by TC-01; explicit matrix entry)
+    #[test]
+    fn test_matrix_none_create_dispute_succeeds() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::None
+        );
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::Disputed
+        );
+    }
+
+    /// [TC-SM-02] None → put_under_review → DisputeNotFound  (illegal transition)
+    #[test]
+    fn test_matrix_none_put_under_review_returns_not_found() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        let err = client
+            .try_put_dispute_under_review(&invoice_id, &admin)
+            .unwrap_err()
+            .expect("expected error");
+        assert_eq!(err, QuickLendXError::DisputeNotFound);
+        // State must be unchanged
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::None
+        );
+    }
+
+    /// [TC-SM-03] None → resolve_dispute → DisputeNotUnderReview  (illegal transition)
+    #[test]
+    fn test_matrix_none_resolve_returns_not_under_review() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        let err = client
+            .try_resolve_dispute(&invoice_id, &admin, &String::from_str(&env, "resolution"))
+            .unwrap_err()
+            .expect("expected error");
+        assert_eq!(err, QuickLendXError::DisputeNotUnderReview);
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::None
+        );
+    }
+
+    // ── Disputed state ───────────────────────────────────────────────────────
+
+    /// [TC-SM-04] Disputed → create_dispute (duplicate) → DisputeAlreadyExists
+    #[test]
+    fn test_matrix_disputed_create_duplicate_returns_already_exists() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "first"),
+            &String::from_str(&env, "evidence"),
+        );
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::Disputed
+        );
+
+        let err = client
+            .try_create_dispute(
+                &invoice_id,
+                &business,
+                &String::from_str(&env, "second"),
+                &String::from_str(&env, "evidence"),
+            )
+            .unwrap_err()
+            .expect("expected error");
+        assert_eq!(err, QuickLendXError::DisputeAlreadyExists);
+        // Status unchanged
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::Disputed
+        );
+    }
+
+    /// [TC-SM-05] Disputed → put_under_review (admin) → UnderReview  (valid)
+    #[test]
+    fn test_matrix_disputed_put_under_review_succeeds() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::UnderReview
+        );
+    }
+
+    /// [TC-SM-06] Disputed → resolve_dispute → DisputeNotUnderReview  (skipped review step)
+    #[test]
+    fn test_matrix_disputed_resolve_returns_not_under_review() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+
+        let err = client
+            .try_resolve_dispute(&invoice_id, &admin, &String::from_str(&env, "resolution"))
+            .unwrap_err()
+            .expect("expected error");
+        assert_eq!(err, QuickLendXError::DisputeNotUnderReview);
+        // Status unchanged
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::Disputed
+        );
+    }
+
+    // ── UnderReview state ───────────────────────────────────────────────────
+
+    /// [TC-SM-07] UnderReview → create_dispute (duplicate) → DisputeAlreadyExists
+    #[test]
+    fn test_matrix_under_review_create_duplicate_returns_already_exists() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::UnderReview
+        );
+
+        let err = client
+            .try_create_dispute(
+                &invoice_id,
+                &business,
+                &String::from_str(&env, "second"),
+                &String::from_str(&env, "evidence"),
+            )
+            .unwrap_err()
+            .expect("expected error");
+        assert_eq!(err, QuickLendXError::DisputeAlreadyExists);
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::UnderReview
+        );
+    }
+
+    /// [TC-SM-08] UnderReview → put_under_review again → InvalidStatus  (already past this step)
+    #[test]
+    fn test_matrix_under_review_put_under_review_again_returns_invalid_status() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+
+        let err = client
+            .try_put_dispute_under_review(&invoice_id, &admin)
+            .unwrap_err()
+            .expect("expected error");
+        assert_eq!(err, QuickLendXError::InvalidStatus);
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::UnderReview
+        );
+    }
+
+    /// [TC-SM-09] UnderReview → resolve_dispute (admin) → Resolved  (valid)
+    #[test]
+    fn test_matrix_under_review_resolve_succeeds() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+        client.resolve_dispute(
+            &invoice_id,
+            &admin,
+            &String::from_str(&env, "Final resolution"),
+        );
+
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::Resolved
+        );
+    }
+
+    // ── Resolved state ──────────────────────────────────────────────────────
+
+    /// [TC-SM-10] Resolved → create_dispute (duplicate) → DisputeAlreadyExists
+    #[test]
+    fn test_matrix_resolved_create_duplicate_returns_already_exists() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+        client.resolve_dispute(&invoice_id, &admin, &String::from_str(&env, "done"));
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::Resolved
+        );
+
+        let err = client
+            .try_create_dispute(
+                &invoice_id,
+                &business,
+                &String::from_str(&env, "new dispute"),
+                &String::from_str(&env, "evidence"),
+            )
+            .unwrap_err()
+            .expect("expected error");
+        assert_eq!(err, QuickLendXError::DisputeAlreadyExists);
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::Resolved
+        );
+    }
+
+    /// [TC-SM-11] Resolved → put_under_review → InvalidStatus  (review-after-resolve)
+    #[test]
+    fn test_matrix_resolved_put_under_review_returns_invalid_status() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+        client.resolve_dispute(&invoice_id, &admin, &String::from_str(&env, "done"));
+
+        let err = client
+            .try_put_dispute_under_review(&invoice_id, &admin)
+            .unwrap_err()
+            .expect("expected error");
+        assert_eq!(
+            err,
+            QuickLendXError::InvalidStatus,
+            "Review-after-resolve must return InvalidStatus"
+        );
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::Resolved
+        );
+    }
+
+    /// [TC-SM-12] Resolved → resolve_dispute (double) → DisputeNotUnderReview
+    #[test]
+    fn test_matrix_resolved_resolve_double_returns_not_under_review() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+        client.resolve_dispute(
+            &invoice_id,
+            &admin,
+            &String::from_str(&env, "First resolution"),
+        );
+
+        let err = client
+            .try_resolve_dispute(
+                &invoice_id,
+                &admin,
+                &String::from_str(&env, "Second resolution"),
+            )
+            .unwrap_err()
+            .expect("expected error");
+        assert_eq!(
+            err,
+            QuickLendXError::DisputeNotUnderReview,
+            "Double-resolve must return DisputeNotUnderReview"
+        );
+        // Original resolution must be preserved
+        let dispute = client
+            .get_dispute_details(&invoice_id)
+            .expect("Dispute must exist");
+        assert_eq!(
+            dispute.resolution,
+            String::from_str(&env, "First resolution")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Timeline-Invariant Tests
+    // -----------------------------------------------------------------------
+    // Each valid transition must append exactly one DisputeTimelineEntry, and
+    // the timeline must remain in strictly sequential order.
+
+    /// [TC-TI-01] After create_dispute the timeline has exactly 1 entry (sequence 0).
+    #[test]
+    fn test_timeline_invariant_exactly_one_entry_after_create() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+
+        let tl = client.get_dispute_timeline(&invoice_id, &0u32, &10u32);
+        assert_eq!(tl.total, 1, "Exactly 1 entry after create_dispute");
+        assert_eq!(tl.entries.len(), 1);
+        assert_eq!(tl.entries.get(0).unwrap().sequence, 0);
+    }
+
+    /// [TC-TI-02] After put_under_review the timeline grows to exactly 2 entries
+    /// and sequence numbers are 0, 1.
+    #[test]
+    fn test_timeline_invariant_two_entries_after_review() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+
+        let tl = client.get_dispute_timeline(&invoice_id, &0u32, &10u32);
+        assert_eq!(tl.total, 2, "Exactly 2 entries after put_under_review");
+        assert_eq!(tl.entries.get(0).unwrap().sequence, 0);
+        assert_eq!(tl.entries.get(1).unwrap().sequence, 1);
+    }
+
+    /// [TC-TI-03] After resolve_dispute the timeline has exactly 3 entries,
+    /// sequences 0–2, events Opened/UnderReview/Resolved, timestamps non-decreasing.
+    #[test]
+    fn test_timeline_invariant_three_entries_after_resolve() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+        client.resolve_dispute(&invoice_id, &admin, &String::from_str(&env, "done"));
+
+        let tl = client.get_dispute_timeline(&invoice_id, &0u32, &10u32);
+        assert_eq!(tl.total, 3, "Exactly 3 entries after resolve_dispute");
+        let e0 = tl.entries.get(0).unwrap();
+        let e1 = tl.entries.get(1).unwrap();
+        let e2 = tl.entries.get(2).unwrap();
+
+        assert_eq!(e0.sequence, 0);
+        assert_eq!(e1.sequence, 1);
+        assert_eq!(e2.sequence, 2);
+        assert_eq!(e0.event, String::from_str(&env, "Opened"));
+        assert_eq!(e1.event, String::from_str(&env, "UnderReview"));
+        assert_eq!(e2.event, String::from_str(&env, "Resolved"));
+        assert!(e0.timestamp <= e1.timestamp);
+        assert!(e1.timestamp <= e2.timestamp);
+    }
+
+    /// [TC-TI-04] An illegal transition (double-resolve) appends zero entries.
+    #[test]
+    fn test_timeline_invariant_failed_op_appends_no_entry() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        client.create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "reason"),
+            &String::from_str(&env, "evidence"),
+        );
+        client.put_dispute_under_review(&invoice_id, &admin);
+        client.resolve_dispute(&invoice_id, &admin, &String::from_str(&env, "done"));
+
+        let before_total = client
+            .get_dispute_timeline(&invoice_id, &0u32, &10u32)
+            .total;
+
+        // This MUST fail and must NOT add an entry
+        let _ = client.try_resolve_dispute(
+            &invoice_id,
+            &admin,
+            &String::from_str(&env, "second attempt"),
+        );
+
+        let after_total = client
+            .get_dispute_timeline(&invoice_id, &0u32, &10u32)
+            .total;
+        assert_eq!(
+            before_total, after_total,
+            "Failed transition must not append a timeline entry"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge Case: dispute on a settled (Cancelled/Defaulted) invoice
+    // -----------------------------------------------------------------------
+
+    /// [TC-EC-01] Creating a dispute on a Cancelled invoice must be rejected.
+    ///
+    /// # Security note
+    /// Once an invoice is in a terminal status it should no longer enter the
+    /// dispute lifecycle.  This prevents post-cancellation griefing.
+    #[test]
+    fn test_create_dispute_on_cancelled_invoice_rejected() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        // Cancel the invoice
+        client.cancel_invoice(&invoice_id);
+
+        let err = client
+            .try_create_dispute(
+                &invoice_id,
+                &business,
+                &String::from_str(&env, "reason"),
+                &String::from_str(&env, "evidence"),
+            )
+            .unwrap_err()
+            .expect("expected error");
+        // The eligibility guard rejects non-disputable statuses
+        assert!(
+            err == QuickLendXError::InvoiceNotAvailableForFunding
+                || err == QuickLendXError::DisputeNotAuthorized,
+            "Cancelled invoice must not accept a new dispute, got: {:?}",
+            err
+        );
+    }
+
+    /// [TC-EC-02] Creating a dispute on a Defaulted invoice must be rejected.
+    #[test]
+    fn test_create_dispute_on_defaulted_invoice_rejected() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        // Force to Defaulted status via admin update
+        client.update_invoice_status(&invoice_id, &crate::invoice::InvoiceStatus::Defaulted);
+
+        let err = client
+            .try_create_dispute(
+                &invoice_id,
+                &business,
+                &String::from_str(&env, "reason"),
+                &String::from_str(&env, "evidence"),
+            )
+            .unwrap_err()
+            .expect("expected error");
+        assert!(
+            err == QuickLendXError::InvoiceNotAvailableForFunding
+                || err == QuickLendXError::DisputeNotAuthorized,
+            "Defaulted invoice must not accept a new dispute, got: {:?}",
+            err
+        );
+    }
+
+    /// [TC-EC-03] Confirming that a Paid invoice (fully settled) CAN still open a dispute.
+    ///
+    /// Per the eligibility matrix, `Paid` is an explicitly allowed pre-dispute state.
+    /// This test verifies the boundary: "settled" in the financial sense is not the
+    /// same as "closed" for dispute purposes.
+    #[test]
+    fn test_create_dispute_on_paid_invoice_is_allowed() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+        let invoice_id = create_test_invoice(&env, &client, &admin, &business, 100_000);
+
+        // Advance invoice to Paid
+        client.update_invoice_status(&invoice_id, &crate::invoice::InvoiceStatus::Verified);
+        client.update_invoice_status(&invoice_id, &crate::invoice::InvoiceStatus::Funded);
+        client.update_invoice_status(&invoice_id, &crate::invoice::InvoiceStatus::Paid);
+
+        let result = client.try_create_dispute(
+            &invoice_id,
+            &business,
+            &String::from_str(&env, "Payment was correct but service not delivered"),
+            &String::from_str(&env, "Supporting evidence"),
+        );
+        assert!(
+            result.is_ok(),
+            "Business must be able to dispute a Paid invoice"
+        );
+        assert_eq!(
+            client.get_invoice(&invoice_id).dispute_status,
+            DisputeStatus::Disputed
+        );
+    }
+
+    /// [TC-EH-01] Evidence hash validation accepts valid 32-byte payload.
+    ///
+    /// Prefer `test_evidence_hash_format` for CI coverage; these legacy cases
+    /// keep the dispute suite aligned with `validate_evidence_hash(&Bytes)`.
+    #[test]
+    fn test_validate_evidence_hash_accepts_valid_32_byte_hash() {
+        let env = Env::default();
+
+        // Create a valid 32-byte hash (all zeros for test purposes)
+        let valid_hash = BytesN::from_array(&env, &[0u8; 32]);
+
+        let result = validate_evidence_hash(&valid_hash);
+        assert!(result.is_ok(), "Valid 32-byte hash should pass validation");
+    }
+
+    /// [TC-EH-02] Evidence hash validation accepts non-zero 32-byte payload.
+    #[test]
+    fn test_validate_evidence_hash_accepts_non_zero_hash() {
+        let env = Env::default();
+
+        // Create a valid 32-byte hash with non-zero values
+        let mut hash_bytes = [0u8; 32];
+        for i in 0..32 {
+            hash_bytes[i] = (i as u8) + 1;
+        }
+        let valid_hash = BytesN::from_array(&env, &hash_bytes);
+
+        let result = validate_evidence_hash(&valid_hash);
+        assert!(
+            result.is_ok(),
+            "Non-zero 32-byte hash should pass validation"
+        );
+    }
+
+    /// [TC-EH-03] Evidence hash validation accepts SHA-256-like hash.
+    #[test]
+    fn test_validate_evidence_hash_accepts_sha256_like_hash() {
+        let env = Env::default();
+
+        // Create a hash that resembles a real SHA-256 output
+        let hash_bytes = [
+            0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x01, 0x12, 0x23, 0x34, 0x45, 0x56, 0x67, 0x78,
+            0x89, 0x9a, 0xab, 0xbc, 0xcd, 0xde, 0xef, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88, 0x99, 0xaa,
+        ];
+        let valid_hash = BytesN::from_array(&env, &hash_bytes);
+
+        let result = validate_evidence_hash(&valid_hash);
+        assert!(result.is_ok(), "SHA-256-like hash should pass validation");
+    }
+
+    /// [TC-EH-04] Evidence hash validation rejects non-32-byte payloads.
+    #[test]
+    fn test_validate_evidence_hash_rejects_wrong_length() {
+        let env = Env::default();
+        let too_short = Bytes::from_slice(&env, &[1u8; 31]);
+        let too_long = Bytes::from_slice(&env, &[1u8; 33]);
+        assert_eq!(
+            validate_evidence_hash(&too_short),
+            Err(QuickLendXError::InvalidDisputeEvidence)
+        );
+        assert_eq!(
+            validate_evidence_hash(&too_long),
+            Err(QuickLendXError::InvalidDisputeEvidence)
+        );
+    }
+
+    /// [TC-ARBITER-01] Arbiter registration and revocation flow.
+    /// Register an arbiter (admin), resolve a dispute, revoke the arbiter (via set_admin),
+    /// attempt to resolve another dispute — must fail.
+    #[test]
+    fn test_arbiter_registration_and_revocation_flow() {
+        let (env, client, admin) = setup();
+        let business = create_verified_business(&env, &client, &admin);
+
+        // 1. Resolve first dispute with the registered arbiter (admin)
+        let invoice_1 = create_test_invoice(&env, &client, &admin, &business, 100_000);
+        client.create_dispute(
+            &invoice_1,
+            &business,
+            &String::from_str(&env, "Reason 1"),
+            &String::from_str(&env, "Evidence 1"),
+        );
+        client.put_dispute_under_review(&invoice_1, &admin);
+        client.resolve_dispute(&invoice_1, &admin, &String::from_str(&env, "Resolution 1"));
+
+        // 2. Revoke the arbiter by transferring admin rights to a new address
+        let new_admin = Address::generate(&env);
+        client.set_admin(&new_admin);
+
+        // 3. Setup a new dispute
+        let invoice_2 = create_test_invoice(&env, &client, &new_admin, &business, 200_000);
+        client.create_dispute(
+            &invoice_2,
+            &business,
+            &String::from_str(&env, "Reason 2"),
+            &String::from_str(&env, "Evidence 2"),
+        );
+
+        // 4. Old arbiter attempts to put under review - must fail
+        let result1 = client.try_put_dispute_under_review(&invoice_2, &admin);
+        assert!(
+            result1.is_err(),
+            "Revoked arbiter cannot put dispute under review"
+        );
+
+        // New arbiter puts under review
+        client.put_dispute_under_review(&invoice_2, &new_admin);
+
+        // 5. Old arbiter attempts to resolve - must fail
+        let result2 =
+            client.try_resolve_dispute(&invoice_2, &admin, &String::from_str(&env, "Resolution 2"));
+        assert!(result2.is_err(), "Revoked arbiter cannot resolve dispute");
     }
 }

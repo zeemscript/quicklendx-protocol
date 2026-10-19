@@ -57,30 +57,98 @@ servers:
     description: Local development server
 
 paths:
+  /fees:
+    get:
+      x-rate-limit:
+        policies: [global, perKey]
+      summary: Get the current fee schedule
+      description: Returns the platform's current fee schedule configurations.
+      operationId: getFeeSchedule
+      responses:
+        "200":
+          description: List of current fee structures
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FeeStructure'
+              example:
+                - fee_type: "Platform"
+                  base_fee_bps: 200
+                  min_fee: "100"
+                  max_fee: "1000000"
+                  is_active: true
+                  updated_at: 1745599232
+                  updated_by: "GBSXVD727UNXJZ7ZM4VCXBTK3UMPXR7O6LLXS7XVOECGDYH3XFNV7C5K"
+
   /health:
     get:
+      x-rate-limit:
+        policies: [global, perKey]
       summary: Health check
       description: Returns the status of the API service and connectivity.
+      operationId: getHealth
       responses:
         "200":
           description: Service is healthy
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: ok
-                  version:
-                    type: string
-                    example: 1.0.0
-                  timestamp:
-                    type: string
-                    format: date-time
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                version: 1.0.0
+                timestamp: '2026-01-01T00:00:00.000Z'
+
+  /status:
+    get:
+      x-rate-limit:
+        policies: [global, perKey]
+      summary: Runtime status and rate limit policy snapshot
+      description: Returns indexer lag status plus the active public rate-limit thresholds.
+      responses:
+        "200":
+          description: Runtime status with live rate-limit policy values
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+              example:
+                lag: 0
+                warnThreshold: 10
+                criticalThreshold: 50
+                level: none
+                isDegraded: false
+                isCritical: false
+                checkedAt: '2026-01-01T00:00:00.000Z'
+                rateLimits:
+                  global:
+                    id: global
+                    scope: all public API endpoints
+                    limit: 100
+                    windowSeconds: 60
+                    blockSeconds: 60
+                    key: client-ip
+                    headers: [X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset]
+                  perKey:
+                    id: perKey
+                    scope: all API endpoints after authentication context is available
+                    limit: 60
+                    windowSeconds: 60
+                    blockSeconds: 60
+                    key: api-key-or-client-ip
+                    headers: [X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset]
+                _system:
+                  status: operational
+                  degraded: false
+                  lag: 0
+                  level: none
 
   /admin/status:
     get:
+      x-rate-limit:
+        policies: [global, perKey]
       summary: Read internal admin status
       description: Returns troubleshooting details for authenticated admin roles.
       security:
@@ -95,6 +163,8 @@ paths:
 
   /admin/audit-logs:
     get:
+      x-rate-limit:
+        policies: [global, perKey]
       summary: Read admin audit logs
       description: Returns recent authorization and admin action audit entries.
       security:
@@ -112,6 +182,9 @@ paths:
 
   /admin/maintenance:
     post:
+      x-rate-limit:
+        policies: [global, perKey]
+      operationId: toggleMaintenanceMode
       summary: Toggle maintenance mode
       description: Restricted to operations admin and super-admin.
       security:
@@ -126,12 +199,24 @@ paths:
               properties:
                 enabled:
                   type: boolean
+            examples:
+              enable:
+                description: Enable maintenance mode
+                value:
+                  enabled: true
+              disable:
+                description: Disable maintenance mode
+                value:
+                  enabled: false
       responses:
         "200":
           description: Maintenance mode updated
 
   /admin/backfill:
     post:
+      x-rate-limit:
+        policies: [global, perKey]
+      operationId: queueBackfillJob
       summary: Queue a backfill job
       description: Restricted to operations admin and super-admin.
       security:
@@ -145,12 +230,20 @@ paths:
                 scope:
                   type: string
                   example: ledger:100000-100500
+            examples:
+              basic:
+                description: Queue backfill for a ledger range
+                value:
+                  scope: "ledger:100000-100500"
       responses:
         "202":
           description: Backfill job queued
 
   /admin/config/dangerous:
     post:
+      x-rate-limit:
+        policies: [global, perKey]
+      operationId: updateDangerousAdminConfig
       summary: Update dangerous admin configuration
       description: Restricted to super-admin only.
       security:
@@ -169,12 +262,20 @@ paths:
                   type: integer
                   minimum: 1
                   maximum: 1440
+            examples:
+              enable:
+                description: Enable emergency config changes with 60 minute window
+                value:
+                  allowEmergencyConfigChanges: true
+                  maintenanceWindowMinutes: 60
       responses:
         "200":
           description: Dangerous config updated
 
   /invoices:
     get:
+      x-rate-limit:
+        policies: [global, perKey]
       summary: List invoices (paginated)
       description: |
         Returns a cursor-paginated list of invoices sorted by `created_at DESC, id ASC`.
@@ -202,23 +303,69 @@ paths:
             $ref: "#/components/schemas/InvoiceStatus"
       responses:
         "200":
-          description: List of invoices
+          description: Paginated list of invoices
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Invoice"
+                type: object
+                required:
+                  - data
+                  - next_cursor
+                  - has_more
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - id
+                      properties:
+                        id: { type: string }
+                        business: { type: string }
+                        amount: { type: string, description: "i128 as string" }
+                        currency: { type: string }
+                        due_date: { type: integer, format: int64 }
+                        status: { $ref: "#/components/schemas/InvoiceStatus" }
+                        description: { type: string }
+                        category: { $ref: "#/components/schemas/InvoiceCategory" }
+                        tags:
+                          type: array
+                          items: { type: string }
+                        metadata: { $ref: "#/components/schemas/InvoiceMetadata" }
+                        created_at: { type: integer, format: int64 }
+                        updated_at: { type: integer, format: int64 }
+                  next_cursor:
+                    type: string
+                    nullable: true
+                  has_more:
+                    type: boolean
+                  freshness:
+                    $ref: '#/components/schemas/FreshnessMetadata'
+                  _system:
+                    type: object
+                    properties:
+                      status: { type: string }
+                      degraded: { type: boolean }
+                      lag: { type: integer }
+                      level: { type: string }
+              example:
+                data: []
+                next_cursor: null
+                has_more: false
 
   /invoices/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        example: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef'
     get:
+      x-rate-limit:
+        policies: [global, perKey]
       summary: Get invoice by ID
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
+      operationId: getInvoiceById
       responses:
         "200":
           description: Invoice details
@@ -228,35 +375,297 @@ paths:
                 $ref: "#/components/schemas/Invoice"
         "404":
           description: Invoice not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                error:
+                  message: 'Invoice not found'
+                  code: INVOICE_NOT_FOUND
 
   /bids:
     get:
-      summary: List bids (paginated)
+      x-rate-limit:
+        policies: [global, perKey]
+      summary: List ranked bids for an invoice (paginated)
       description: |
-        Returns a cursor-paginated list of bids sorted by `timestamp DESC, bid_id ASC`.
+        Returns a cursor-paginated list of ranked bids for a given invoice, sorted by
+        contract ranking semantics: (1) profit DESC, (2) expected_return DESC, (3) bid_amount DESC,
+        (4) timestamp DESC, (5) bid_id ASC.
+
+        Only returns Placed bids. Query parameter `invoice_id` is **required**.
+      security:
+        - {}  # Optional authentication
       parameters:
         - $ref: '#/components/parameters/LimitParam'
         - $ref: '#/components/parameters/CursorParam'
         - name: invoice_id
           in: query
+          required: true
           schema:
             type: string
+            format: hex
+            example: "0x1234567890abcdef..."
+          description: Invoice ID to filter bids
         - name: investor
           in: query
           schema:
             type: string
+            format: stellar-address
+            example: "GBSXVD727UNXJZ7ZM4VCXBTK3UMPXR7O6LLXS7XVOECGDYH3XFNV7C5K"
+          description: Optional filter by investor address
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/BidStatus"
+          description: Optional filter by bid status (default Placed only)
       responses:
         "200":
-          description: List of bids
+          description: Paginated ranked bids
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Bid"
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Bid"
+                  next_cursor:
+                    type: string
+                    nullable: true
+                  has_more:
+                    type: boolean
+        "400":
+          description: Missing required invoice_id query parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                error:
+                  message: "invoice_id is required"
+                  code: "MISSING_REQUIRED_FIELD"
+    post:
+      x-rate-limit:
+        policies: [global, perKey]
+      operationId: createBid
+      summary: Place a new bid on a Verified invoice
+      description: |
+        Creates a new bid for an investor on a Verified invoice.
+
+        Requires authentication (Bearer token in Authorization header).
+
+        **Validation rules:**
+        - Invoice must be in Verified status
+        - Investor cannot have an active bid on the same invoice (no duplicates)
+        - bid_amount must be > 0
+        - expected_return must be >= bid_amount
+        - expiration_timestamp must be a positive integer
+        - The investor's aggregate USD-equivalent exposure (active bids +
+          unsettled settlements across MOCK_BIDS, MOCK_SETTLEMENTS, and the
+          persisted stores) plus this new bid must not exceed
+          `EXPOSURE_CAP_PER_INVESTOR_USD`. Otherwise the request is rejected
+          with `429 EXPOSURE_CAP_EXCEEDED` before any chain interaction.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: If-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          description: ETag precondition for the invoice being bid on. When present and the invoice ETag doesn't match, the server returns 412 Precondition Failed.
+        - name: If-Unmodified-Since
+          in: header
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: Date precondition for the invoice being bid on.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - invoice_id
+                - bid_amount
+                - expected_return
+                - expiration_timestamp
+              properties:
+                invoice_id:
+                  type: string
+                  format: hex
+                  example: "0x1234567890abcdef..."
+                  description: Invoice ID to bid on
+                bid_amount:
+                  type: string
+                  pattern: "^[0-9]+$"
+                  example: "1000000"
+                  description: Bid amount (as numeric string for JSON safety)
+                expected_return:
+                  type: string
+                  pattern: "^[0-9]+$"
+                  example: "1500000"
+                  description: Expected return (must be >= bid_amount, as numeric string)
+                expiration_timestamp:
+                  type: integer
+                  example: 1745599232
+                  description: Unix timestamp when this bid expires
+                currency:
+                  type: string
+                  pattern: "^[A-Za-z]{3,4}$"
+                  example: "USDC"
+                  description: |
+                    Optional currency tag. Defaults to `USDC`. The exposure
+                    service normalizes the amount to USD-equivalent using
+                    the configured currency rate table.
+            examples:
+              standard:
+                description: Standard bid with expected return 1.5x bid amount
+                value:
+                  invoice_id: "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+                  bid_amount: "1000000"
+                  expected_return: "1500000"
+                  expiration_timestamp: 1745599232
+                  currency: "USDC"
+      responses:
+        "201":
+          description: Bid created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Bid"
+        "400":
+          description: Invalid bid parameters (non-Verified invoice, duplicate bid, validation failure)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: object
+                    properties:
+                      message:
+                        type: string
+                      code:
+                        type: string
+                        enum:
+                          - INVALID_BID
+                          - VALIDATION_ERROR
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "429":
+          description: |
+            Investor exposure cap would be exceeded. The cap is configured
+            via `EXPOSURE_CAP_PER_INVESTOR_USD` and is denominated in whole
+            USD units (the response carries micro-USD strings for precision).
+            The investor should reduce active exposure (e.g. wait for a
+            settlement to finalize) before retrying.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: object
+                    required: [message, code]
+                    properties:
+                      message:
+                        type: string
+                        description: Human-readable description of why the cap was exceeded.
+                      code:
+                        type: string
+                        enum: [EXPOSURE_CAP_EXCEEDED]
+                      currentExposureUsd:
+                        type: string
+                        description: Current USD-equivalent exposure for the investor (micro-USD, BigInt as string).
+                      attemptedUsd:
+                        type: string
+                        description: USD-equivalent of the rejected bid (micro-USD, BigInt as string).
+                      capUsd:
+                        type: string
+                        description: Configured per-investor cap (micro-USD, BigInt as string).
+                      investor:
+                        type: string
+                        description: Investor (Stellar address) whose cap would be exceeded.
+              example:
+                error:
+                  message: "Investor GAX... exposure cap would be exceeded: current=1100000000000000, attempted=500000000000000, cap=1500000000000000"
+                  code: EXPOSURE_CAP_EXCEEDED
+                  currentExposureUsd: "1100000000000000"
+                  attemptedUsd: "500000000000000"
+                  capUsd: "1500000000000000"
+                  investor: "GAXMFSADZVDXTJSLL3HZJFVYH4JGBQBMX3I2WGPKH3YKRXL7ZJXZK23Q"
+
+  /bids/{invoiceId}/best:
+    get:
+      x-rate-limit:
+        policies: [global, perKey]
+      summary: Get the best bid for an invoice
+      description: |
+        Returns the highest-ranked (best) bid for an invoice, or 404 if no Placed bids exist.
+      parameters:
+        - name: invoiceId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: hex
+          description: Invoice ID
+      responses:
+        "200":
+          description: Best bid for the invoice
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Bid"
+        "404":
+          description: No bids found for this invoice
+
+  /bids/{invoiceId}/ranked:
+    get:
+      x-rate-limit:
+        policies: [global, perKey]
+      summary: Get all ranked bids for an invoice
+      description: |
+        Returns all Placed bids for an invoice ranked by contract semantics.
+        (best first: profit DESC, expected_return DESC, bid_amount DESC, timestamp DESC, bid_id ASC)
+      parameters:
+        - name: invoiceId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: hex
+          description: Invoice ID
+      responses:
+        "200":
+          description: Ranked bids
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Bid"
 
   /settlements:
     get:
+      x-rate-limit:
+        policies: [global, perKey]
       summary: List settlements (paginated)
       description: |
         Returns a cursor-paginated list of settlements sorted by `timestamp DESC, id ASC`.
@@ -273,19 +682,45 @@ paths:
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Settlement"
+                type: object
+                required:
+                  - data
+                  - freshness
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Settlement"
+                  freshness:
+                    $ref: '#/components/schemas/FreshnessMetadata'
+                  _system:
+                    type: object
+                    properties:
+                      status: { type: string }
+                      degraded: { type: boolean }
+                      lag: { type: integer }
+                      level: { type: string }
+              example:
+                data: []
+                freshness:
+                  lastIndexedLedger: 100000
+                  indexLagSeconds: 0
+                  lastUpdatedAt: "2026-06-23T17:00:00Z"
+                  cursor: "100000_0"
 
   /settlements/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        example: '0xsettle123'
     get:
+      x-rate-limit:
+        policies: [global, perKey]
       summary: Get settlement by ID
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
+      operationId: getSettlementById
       responses:
         "200":
           description: Settlement details
@@ -293,11 +728,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Settlement"
-        "404":
-          description: Settlement not found
+        "500":
+          description: Internal Server Error (e.g. database table missing in test env)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                error:
+                  message: 'no such table: settlements'
+                  code: SQLITE_ERROR
 
   /portfolio:
     get:
+      x-rate-limit:
+        policies: [global, perKey]
       summary: List investor portfolio (paginated)
       description: |
         Returns a cursor-paginated list of portfolio entries for a given investor,
@@ -324,26 +769,72 @@ paths:
           $ref: '#/components/responses/PaginationError'
 
   /invoices/{id}/disputes:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        example: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef'
     get:
+      x-rate-limit:
+        policies: [global, perKey]
       summary: List disputes for an invoice
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
+      operationId: listDisputesByInvoice
       responses:
         "200":
-          description: List of disputes
+          description: Paginated list of disputes for an invoice
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Dispute"
+                type: object
+                required:
+                  - data
+                  - next_cursor
+                  - has_more
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - id
+                        - invoice_id
+                        - initiator
+                        - reason
+                        - status
+                        - created_at
+                      properties:
+                        id: { type: string }
+                        invoice_id: { type: string }
+                        initiator: { type: string }
+                        reason: { type: string }
+                        status: { $ref: "#/components/schemas/DisputeStatus" }
+                        created_at: { type: integer, format: int64 }
+                        contract_version: { type: integer }
+                        event_schema_version: { type: integer }
+                        indexed_at: { type: string }
+                  next_cursor:
+                    type: string
+                    nullable: true
+                  has_more:
+                    type: boolean
+                  _system:
+                    type: object
+                    properties:
+                      status: { type: string }
+                      degraded: { type: boolean }
+                      lag: { type: integer }
+                      level: { type: string }
+              example:
+                data: []
+                next_cursor: null
+                has_more: false
 
   /notifications/preferences/{userId}:
     get:
+      x-rate-limit:
+        policies: [global, perKey]
       summary: Get user notification preferences
       parameters:
         - name: userId
@@ -362,6 +853,9 @@ paths:
         '404':
           description: User preferences not found
     put:
+      x-rate-limit:
+        policies: [global, perKey]
+      operationId: updateNotificationPreferences
       summary: Update user notification preferences
       parameters:
         - name: userId
@@ -376,6 +870,17 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/UpdateNotificationPreferences'
+            examples:
+              enableAll:
+                description: Enable all notification types
+                value:
+                  email_enabled: true
+                  email_address: "user@example.com"
+                  notifications:
+                    invoice_funded: true
+                    payment_received: true
+                    dispute_opened: true
+                    dispute_resolved: true
       responses:
         '200':
           description: Preferences updated successfully
@@ -384,6 +889,8 @@ paths:
 
   /notifications/unsubscribe/{userId}:
     post:
+      x-rate-limit:
+        policies: [global, perKey]
       summary: Unsubscribe user from email notifications
       parameters:
         - name: userId
@@ -398,6 +905,8 @@ paths:
 
   /exports/generate:
     post:
+      x-rate-limit:
+        policies: [global, perKey, export]
       summary: Generate a signed data export link
       description: Returns a short-lived link to download all user-scoped data (invoices, bids, settlements) in CSV or JSON format.
       security:
@@ -428,11 +937,39 @@ paths:
                     example: "1 hour"
         "401":
           description: Authentication required
+        "429":
+          description: Too many concurrent export jobs. Please try again later.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: object
+                    required: [message, code]
+                    properties:
+                      message:
+                        type: string
+                        description: Human-readable error message.
+                      code:
+                        type: string
+                        enum: [EXPORT_CONCURRENCY_EXCEEDED]
+              example:
+                error:
+                  message: "Too many concurrent export jobs. Please try again later."
+                  code: "EXPORT_CONCURRENCY_EXCEEDED"
 
   /exports/download/{token}:
     get:
+      x-rate-limit:
+        policies: [global, perKey, export]
       summary: Download exported data
-      description: Serves the export file using a signed token.
+      description: >
+        Serves the export file using a signed one-shot token. The file is
+        streamed from disk and deleted immediately after the first successful
+        download. Subsequent requests with the same token return 401.
+        The token expires after the configured TTL (default 1 hour).
       parameters:
         - name: token
           in: path
@@ -442,7 +979,12 @@ paths:
           description: Signed token representing the export request.
       responses:
         "200":
-          description: Export file content
+          description: Export file content (one-shot; file deleted after response)
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              example: 'attachment; filename="quicklendx-export-USER-2026-01-01.json"'
           content:
             application/json:
               schema:
@@ -451,10 +993,13 @@ paths:
               schema:
                 type: string
         "401":
-          description: Invalid or expired token
+          description: Invalid, expired, or already-consumed token
 
   /events:
     post:
+      x-rate-limit:
+        policies: [global, perKey]
+      operationId: processBlockchainEvents
       summary: Process blockchain events for notifications
       description: Internal endpoint for indexer to post events that trigger notifications
       requestBody:
@@ -467,11 +1012,99 @@ paths:
                 - type: array
                   items:
                     $ref: '#/components/schemas/Event'
+            examples:
+              singleEvent:
+                description: Single blockchain event
+                value:
+                  type: "InvoiceCreated"
+                  data:
+                    invoice_id: "0x123abc"
+                    amount: "1000000"
+              multipleEvents:
+                description: Array of blockchain events
+                value:
+                  - type: "InvoiceCreated"
+                    data:
+                      invoice_id: "0x123abc"
+                      amount: "1000000"
+                  - type: "BidPlaced"
+                    data:
+                      bid_id: "0xbid123"
+                      invoice_id: "0x123abc"
       responses:
         '200':
           description: Events processed successfully
         '500':
           description: Internal server error
+
+  /keys/{id}/rotate-signing-secret:
+    post:
+      x-rate-limit:
+        policies: [global, perKey]
+      summary: Rotate an API key's signing secret
+      description: |
+        Generates a new signing secret for the specified API key ID, retaining the old secret for a configurable grace window (default 24h). Requires admin RBAC privileges.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The ID of the API key to rotate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - actor
+              properties:
+                actor:
+                  type: string
+                  description: Identifier of the admin performing the rotation
+                grace_window_hours:
+                  type: integer
+                  default: 24
+                  description: Hours to retain the old secret
+      responses:
+        "200":
+          description: Successfully rotated the signing secret
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                      key:
+                        type: string
+                        description: The new plaintext key. Only returned once.
+                      prefix:
+                        type: string
+                      scopes:
+                        type: array
+                        items:
+                          type: string
+                      created_at:
+                        type: string
+                        format: date-time
+                      prev_secret_expires_at:
+                        type: string
+                        format: date-time
+                      warning:
+                        type: string
+        "400":
+          description: Validation error or failure to rotate
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "403":
+          description: Insufficient admin role permissions
 
 components:
   securitySchemes:
@@ -481,6 +1114,29 @@ components:
       bearerFormat: opaque-token
 
   schemas:
+    HealthResponse:
+      type: object
+      description: Health check payload returned by GET /health.
+      required:
+        - status
+        - version
+        - timestamp
+      properties:
+        status:
+          type: string
+          description: Service health status.
+          enum:
+            - ok
+            - error
+        version:
+          type: string
+          description: Running service version.
+          example: 1.0.0
+        timestamp:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp of the health probe.
+
     FreshnessMetadata:
       type: object
       description: >
@@ -546,6 +1202,11 @@ components:
 
     LineItem:
       type: object
+      required:
+        - description
+        - quantity
+        - unit_price
+        - total
       properties:
         description: { type: string }
         quantity: { type: string, description: "i128 as string" }
@@ -554,18 +1215,76 @@ components:
 
     InvoiceMetadata:
       type: object
+      required:
+        - customer_name
+        - customer_address
+        - tax_id
+        - line_items
+        - notes
       properties:
-        customer_name: { type: string }
-        customer_address: { type: string }
-        tax_id: { type: string }
+        customer_name:
+          type: string
+        customer_address:
+          type: string
+        tax_id:
+          type: string
         line_items:
           type: array
           items:
             $ref: "#/components/schemas/LineItem"
         notes: { type: string }
 
+    FeeStructure:
+      type: object
+      required:
+        - fee_type
+        - base_fee_bps
+        - min_fee
+        - max_fee
+        - is_active
+        - updated_at
+        - updated_by
+      properties:
+        fee_type:
+          type: string
+          enum: [Platform, Processing, Verification, EarlyPayment, LatePayment]
+          description: Type of the fee
+        base_fee_bps:
+          type: integer
+          description: Base fee in basis points
+        min_fee:
+          type: string
+          description: Minimum fee amount as string (i128)
+        max_fee:
+          type: string
+          description: Maximum fee amount as string (i128)
+        is_active:
+          type: boolean
+          description: Whether this fee structure is currently active
+        updated_at:
+          type: integer
+          format: int64
+          description: Unix timestamp of last update
+        updated_by:
+          type: string
+          format: stellar-address
+          description: Address of the admin who last updated the fee structure
+
     Invoice:
       type: object
+      required:
+        - id
+        - business
+        - amount
+        - currency
+        - due_date
+        - status
+        - description
+        - category
+        - tags
+        - metadata
+        - created_at
+        - updated_at
       properties:
         id: { type: string }
         business: { type: string }
@@ -588,6 +1307,15 @@ components:
 
     Bid:
       type: object
+      required:
+        - bid_id
+        - invoice_id
+        - investor
+        - bid_amount
+        - expected_return
+        - timestamp
+        - status
+        - expiration_timestamp
       properties:
         bid_id: { type: string }
         invoice_id: { type: string }
@@ -604,6 +1332,14 @@ components:
 
     Settlement:
       type: object
+      required:
+        - id
+        - invoice_id
+        - amount
+        - payer
+        - recipient
+        - timestamp
+        - status
       properties:
         id: { type: string }
         invoice_id: { type: string }
@@ -612,6 +1348,9 @@ components:
         recipient: { type: string }
         timestamp: { type: integer, format: int64 }
         status: { $ref: "#/components/schemas/SettlementStatus" }
+        contract_version: { type: integer }
+        event_schema_version: { type: integer }
+        indexed_at: { type: string }
 
     InvestmentStatus:
       type: string
@@ -634,6 +1373,13 @@ components:
 
     Dispute:
       type: object
+      required:
+        - id
+        - invoice_id
+        - initiator
+        - reason
+        - status
+        - created_at
       properties:
         id: { type: string }
         invoice_id: { type: string }
@@ -642,3 +1388,212 @@ components:
         status: { $ref: "#/components/schemas/DisputeStatus" }
         created_at: { type: integer, format: int64 }
         resolved_at: { type: integer, format: int64 }
+
+    PortfolioPageResult:
+      type: object
+      description: Paginated result wrapper for portfolio entries.
+      required:
+        - data
+        - next_cursor
+        - has_more
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PortfolioEntry'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque cursor for the next page; null when no more pages exist.
+        has_more:
+          type: boolean
+          description: true when more items exist beyond this page.
+
+    InvoicePageResult:
+      type: object
+      description: Paginated result wrapper for invoices.
+      required:
+        - data
+        - next_cursor
+        - has_more
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Invoice'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Opaque cursor for the next page; null when no more pages exist.
+        has_more:
+          type: boolean
+          description: true when more items exist beyond this page.
+
+    BidPageResult:
+      type: object
+      description: Paginated result wrapper for bids.
+      required:
+        - data
+        - next_cursor
+        - has_more
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Bid'
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+
+    DisputePageResult:
+      type: object
+      description: Paginated result wrapper for disputes.
+      required:
+        - data
+        - next_cursor
+        - has_more
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Dispute'
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+
+    ErrorEnvelope:
+      type: object
+      description: Standard error response envelope used across all controllers.
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - message
+            - code
+          properties:
+            message:
+              type: string
+              description: Human-readable error description.
+            code:
+              type: string
+              description: Machine-readable error code (SCREAMING_SNAKE_CASE).
+            details:
+              description: Optional extra details (omitted in production).
+        _system:
+          type: object
+          properties:
+            status: { type: string }
+            degraded: { type: boolean }
+            lag: { type: integer }
+            level: { type: string }
+
+    ErrorResponse:
+      type: object
+      description: Canonical error body for resource-level failures (404 responses).
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - message
+            - code
+          properties:
+            message:
+              type: string
+              description: Human-readable error description.
+            code:
+              type: string
+              description: Machine-readable error code (SCREAMING_SNAKE_CASE).
+
+    NotificationType:
+      type: string
+      enum:
+        - invoice_funded
+        - payment_received
+        - dispute_opened
+        - dispute_resolved
+
+    UserNotificationPreferences:
+      type: object
+      properties:
+        userId:
+          type: string
+        email_enabled:
+          type: boolean
+        email_address:
+          type: string
+          format: email
+        notifications:
+          type: object
+          additionalProperties:
+            type: boolean
+
+    UpdateNotificationPreferences:
+      type: object
+      properties:
+        email_enabled:
+          type: boolean
+        email_address:
+          type: string
+          format: email
+        notifications:
+          type: object
+          additionalProperties:
+            type: boolean
+
+    Event:
+      type: object
+      description: A blockchain event to be processed for notifications.
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          description: Event type identifier (e.g. InvoiceCreated, BidPlaced).
+        data:
+          type: object
+          description: Event payload; shape varies by type.
+
+  parameters:
+    LimitParam:
+      name: limit
+      in: query
+      description: Number of items per page. Clamped to [1, 100].
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+    CursorParam:
+      name: cursor
+      in: query
+      description: Opaque cursor from a previous response's next_cursor field.
+      schema:
+        type: string
+
+  responses:
+    PaginationError:
+      description: Invalid pagination parameters (bad limit or malformed cursor).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+
+    Unauthorized:
+      description: Missing or invalid API credentials.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            error:
+              message: Authentication required
+              code: UNAUTHORIZED
